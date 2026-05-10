@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reddit Saved Slideshow</title>
+<style>
+  :root {
+    --bg: #0b0b0d;
+    --fg: #f3f3f3;
+    --muted: #9aa0a6;
+    --accent: #ff4500;
+    --panel: #16171b;
+    --border: #2a2c33;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); }
+  button { font: inherit; cursor: pointer; padding: 10px 16px; border: 1px solid var(--border); background: var(--panel); color: var(--fg); border-radius: 6px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  input[type=range] { vertical-align: middle; }
+  .container { max-width: 720px; margin: 0 auto; padding: 32px 20px; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  .muted { color: var(--muted); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin: 16px 0; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row > * { margin: 4px 0; }
+  .stat { display: inline-block; padding: 4px 10px; background: #22242b; border-radius: 999px; margin-right: 6px; font-size: 12px; }
+
+  .dropzone { border: 2px dashed var(--border); border-radius: 10px; padding: 28px; text-align: center; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+  .dropzone:hover, .dropzone.dragover { border-color: var(--accent); background: rgba(255, 69, 0, 0.05); }
+  .dropzone input { display: none; }
+  .dropzone strong { color: var(--accent); }
+
+  /* slideshow */
+  #stage { position: fixed; inset: 0; background: #000; display: none; z-index: 10; }
+  #stage.active { display: block; }
+  #stage .media-wrap { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+  #stage img, #stage video { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; }
+
+  #title-bar { position: absolute; top: 0; left: 0; right: 0; padding: 14px 18px; background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent); color: #fff; font-size: 13px; transition: opacity 0.4s; pointer-events: none; }
+  #title-bar a { pointer-events: auto; color: #fff; text-decoration: underline; }
+  #title-bar .post-title { font-weight: 600; margin-bottom: 2px; max-width: 80%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  #controls { position: absolute; bottom: 0; left: 0; right: 0; padding: 14px 18px; background: linear-gradient(to top, rgba(0,0,0,0.75), transparent); transition: opacity 0.4s; }
+  #controls .row { gap: 10px; align-items: center; color: #fff; }
+  #controls button { background: rgba(255,255,255,0.12); border: 1px solid rgba(255,255,255,0.2); color: #fff; padding: 8px 12px; border-radius: 6px; }
+  #controls button:hover { background: rgba(255,255,255,0.22); }
+  #controls .grow { flex: 1; }
+  #controls label { color: #fff; }
+
+  .hide-cursor { cursor: none; }
+  .hide-cursor #title-bar, .hide-cursor #controls { opacity: 0; }
+
+  .progress { position: absolute; bottom: 0; left: 0; height: 2px; background: var(--accent); width: 0%; transition: width 0.05s linear; }
+
+  .errbox { color: #ffb4b4; background: #2a1414; border: 1px solid #4a2020; padding: 10px; border-radius: 6px; margin: 10px 0; }
+</style>
+</head>
+<body>
+
+<div id="app" class="container">
+  <h1>Reddit Saved Slideshow</h1>
+  <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
+
+  <div id="upload-panel" class="panel">
+    <ol style="margin-top:0">
+      <li>Request your data at <a href="https://www.reddit.com/settings/data-request" target="_blank" rel="noopener">reddit.com/settings/data-request</a> → wait for the email (usually a few hours).</li>
+      <li>Unzip the export and find <code>saved_posts.csv</code>.</li>
+      <li>Drop it below.</li>
+    </ol>
+    <label class="dropzone" id="dropzone">
+      <input id="csv-file" type="file" accept=".csv,text/csv,.json,application/json">
+      <div><strong>Click to choose</strong> or drag <code>saved_posts.csv</code> (fresh) or <code>cache.json</code> (previously exported) here</div>
+      <div class="muted" style="margin-top:6px;font-size:12px">Posts in private/quarantined subs are skipped. Reddit's public JSON endpoints are rate-limited; large exports take a minute.</div>
+    </label>
+    <div class="row" style="margin-top:12px">
+      <label for="csv-limit">Limit:</label>
+      <select id="csv-limit">
+        <option value="100">100 most recent</option>
+        <option value="500" selected>500 most recent</option>
+        <option value="1000">1000 most recent</option>
+        <option value="0">All</option>
+      </select>
+      <span class="muted" style="font-size:12px">Reddit's GDPR CSV is ordered newest-first, so the limit takes the most recently saved posts.</span>
+    </div>
+  </div>
+
+  <div id="data-panel" class="panel" style="display:none">
+    <div class="row">
+      <span>Source: <strong id="source-name">…</strong></span>
+      <span class="grow"></span>
+      <button id="export-btn">Download cache (.json)</button>
+      <button id="reset-btn">Upload different file</button>
+      <button id="start-btn" class="primary" disabled>Start slideshow</button>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label for="sort-mode">Order:</label>
+      <select id="sort-mode">
+        <option value="shuffle" selected>Shuffle (random)</option>
+        <option value="oldest">Oldest saved → newest</option>
+        <option value="newest">Newest saved → oldest</option>
+      </select>
+      <label for="filter-mode" style="margin-left:12px">Filter:</label>
+      <select id="filter-mode">
+        <option value="all" selected>All media</option>
+        <option value="image">Photos only</option>
+        <option value="video">Videos only (incl. GIFs)</option>
+        <option value="gif">GIFs only</option>
+      </select>
+    </div>
+    <div id="stats" style="margin-top:12px"></div>
+    <div id="progress-text" class="muted" style="margin-top:8px"></div>
+  </div>
+
+  <div id="errors"></div>
+</div>
+
+<div id="stage">
+  <div class="media-wrap" id="media-wrap"></div>
+  <div id="title-bar">
+    <div class="post-title" id="post-title"></div>
+    <a id="post-link" href="#" target="_blank" rel="noopener">Open on Reddit</a>
+    <span style="margin-left:12px" id="slide-counter"></span>
+  </div>
+  <div id="controls">
+    <div class="row">
+      <button id="ctrl-prev">‹ Prev</button>
+      <button id="ctrl-playpause">Pause</button>
+      <button id="ctrl-next">Next ›</button>
+      <span style="margin-left:12px"></span>
+      <label>Interval: <span id="interval-label">1.0s</span></label>
+      <input id="ctrl-interval" type="range" min="0.5" max="10" step="0.1" value="1">
+      <label><input id="ctrl-hold" type="checkbox" checked> Hold for videos</label>
+      <span class="grow"></span>
+      <button id="ctrl-shuffle">Reshuffle</button>
+      <button id="ctrl-exit">Exit</button>
+    </div>
+  </div>
+  <div class="progress" id="progress"></div>
+</div>
+
+<script>
+const LS = {
+  SAVED: "rss.saved",   // { fetchedAt, items: [...], filename }
+  PREFS: "rss.prefs",   // { interval, hold }
+};
+
+const $ = (sel) => document.querySelector(sel);
+
+function showError(msg) {
+  const div = document.createElement("div");
+  div.className = "errbox";
+  div.textContent = msg;
+  $("#errors").appendChild(div);
+  console.error(msg);
+}
+
+function htmlUnescape(s) {
+  if (!s) return s;
+  const t = document.createElement("textarea");
+  t.innerHTML = s;
+  return t.value;
+}
+
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function formatAge(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+  return `${Math.floor(s/86400)}d ago`;
+}
+
+/* ============================================================
+ * CSV parsing
+ * ============================================================ */
+function parseCSV(text) {
+  const rows = [];
+  let row = [], cur = "", inQuotes = false, i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { cur += '"'; i += 2; continue; }
+        inQuotes = false; i++; continue;
+      }
+      cur += ch; i++; continue;
+    }
+    if (ch === '"') { inQuotes = true; i++; continue; }
+    if (ch === ",") { row.push(cur); cur = ""; i++; continue; }
+    if (ch === "\r") { i++; continue; }
+    if (ch === "\n") { row.push(cur); rows.push(row); row = []; cur = ""; i++; continue; }
+    cur += ch; i++;
+  }
+  if (cur.length || row.length) { row.push(cur); rows.push(row); }
+  if (!rows.length) return [];
+  const header = rows[0].map(h => h.trim().toLowerCase());
+  return rows.slice(1).filter(r => r.length && r.some(c => c.length)).map(r => {
+    const obj = {};
+    header.forEach((h, idx) => obj[h] = r[idx]);
+    return obj;
+  });
+}
+
+function extractPostIdsFromCSV(rows) {
+  const ids = [];
+  for (const r of rows) {
+    let id = (r.id || "").trim();
+    if (!id && r.permalink) {
+      const m = r.permalink.match(/\/comments\/([a-z0-9]+)/i);
+      if (m) id = m[1];
+    }
+    if (id) {
+      id = id.replace(/^t3_/, "");
+      ids.push(id);
+    }
+  }
+  return Array.from(new Set(ids));
+}
+
+/* ============================================================
+ * Batch fetch from public Reddit JSON
+ * ============================================================ */
+async function fetchWithTimeout(url, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { headers: { "Accept": "application/json" }, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function fetchPostsByIds(ids, onProgress, existing = []) {
+  const BATCH = 100;
+  const DELAY_MS = 1500;
+  const TIMEOUT_MS = 20_000;
+  const MAX_RETRIES = 4;
+  const out = existing.slice();
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const slice = ids.slice(i, i + BATCH);
+    const fullIds = slice.map(id => "t3_" + id).join(",");
+    const url = `https://www.reddit.com/api/info.json?id=${fullIds}&raw_json=1`;
+    const batchNum = Math.floor(i / BATCH) + 1;
+
+    let attempt = 0;
+    let success = false;
+    while (attempt <= MAX_RETRIES && !success) {
+      attempt++;
+      try {
+        const res = await fetchWithTimeout(url, TIMEOUT_MS);
+        if (res.status === 429 || res.status === 503) {
+          const wait = Math.min(60_000, 5000 * attempt);
+          onProgress?.(out.length, ids.length, `throttled (${res.status}) — waiting ${wait/1000}s`);
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        const children = data?.data?.children || [];
+        for (const c of children) out.push(c);
+        success = true;
+      } catch (e) {
+        const isAbort = e.name === "AbortError";
+        const wait = Math.min(60_000, 4000 * attempt);
+        if (attempt > MAX_RETRIES) {
+          // Save partial results as slides.
+          saveCache({
+            fetchedAt: Date.now(),
+            slides: expandToSlides(out),
+            filename: "(partial)",
+            partial: true,
+          });
+          throw new Error(`Batch ${batchNum} failed after ${MAX_RETRIES} retries (${isAbort ? "timeout" : e.message}). ${out.length} posts saved so far — start the slideshow with what you have, or retry.`);
+        }
+        onProgress?.(out.length, ids.length, `${isAbort ? "timeout" : "error"} on batch ${batchNum}, retry ${attempt}/${MAX_RETRIES} in ${wait/1000}s`);
+        await new Promise(r => setTimeout(r, wait));
+      }
+    }
+
+    onProgress?.(out.length, ids.length, null);
+    if (i + BATCH < ids.length) await new Promise(r => setTimeout(r, DELAY_MS));
+  }
+  return out;
+}
+
+async function loadFromFile(file) {
+  const isJson = /\.json$/i.test(file.name) || file.type === "application/json";
+  if (isJson) return loadFromJSON(file);
+  return loadFromCSV(file);
+}
+
+async function loadFromJSON(file) {
+  $("#errors").innerHTML = "";
+  $("#progress-text").textContent = "Reading cache file…";
+  $("#data-panel").style.display = "block";
+  try {
+    const text = await file.text();
+    const cache = JSON.parse(text);
+    if (!cache || !Array.isArray(cache.slides)) {
+      throw new Error("That JSON doesn't look like a slideshow cache (no `slides` array).");
+    }
+    saveCache({
+      fetchedAt: cache.fetchedAt || Date.now(),
+      slides: cache.slides,
+      filename: cache.filename || file.name,
+    });
+    $("#progress-text").textContent = `Loaded ${cache.slides.length} slides from ${file.name}.`;
+    renderCacheInfo();
+  } catch (e) {
+    showError(e.message);
+    $("#progress-text").textContent = "";
+  }
+}
+
+function exportCache() {
+  const cache = loadCache();
+  if (!cache) return;
+  const blob = new Blob([JSON.stringify(cache)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `reddit-slideshow-cache-${new Date().toISOString().slice(0,10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function loadFromCSV(file) {
+  $("#errors").innerHTML = "";
+  $("#progress-text").textContent = "Reading CSV…";
+  $("#data-panel").style.display = "block";
+  $("#source-name").textContent = file.name;
+  $("#start-btn").disabled = true;
+  try {
+    const text = await file.text();
+    const rows = parseCSV(text);
+    let ids = extractPostIdsFromCSV(rows);
+    if (!ids.length) {
+      showError("No post IDs found in that CSV. Make sure it's saved_posts.csv from your Reddit GDPR export.");
+      $("#progress-text").textContent = "";
+      return;
+    }
+    const limit = parseInt($("#csv-limit").value, 10) || 0;
+    const totalFound = ids.length;
+    if (limit > 0 && ids.length > limit) ids = ids.slice(0, limit);
+    $("#progress-text").textContent = `Found ${totalFound} post IDs${limit > 0 && totalFound > limit ? ` (using newest ${ids.length})` : ""}. Fetching from Reddit…`;
+    const items = await fetchPostsByIds(ids, (n, total, note) => {
+      $("#progress-text").textContent = `Fetched ${n} / ${total}${note ? " — " + note : ""}…`;
+    });
+    let slides = expandToSlides(items);
+    const externalCount = slides.filter(s => s.kind === "external").length;
+    if (externalCount > 0) {
+      $("#progress-text").textContent = `Resolving ${externalCount} external videos (Redgifs)…`;
+      slides = await enrichExternalSlides(slides, (n, total) => {
+        $("#progress-text").textContent = `Resolving external videos: ${n} / ${total}…`;
+      });
+    }
+    saveCache({ fetchedAt: Date.now(), slides, filename: file.name });
+    $("#progress-text").textContent = `Done. ${items.length} posts → ${slides.length} media slides.`;
+    renderCacheInfo();
+  } catch (e) {
+    showError(e.message);
+    $("#progress-text").textContent = "";
+  }
+}
+
+/* ============================================================
+ * Filter media + expand galleries
+ * ============================================================ */
+function expandToSlides(savedItems) {
+  const out = [];
+  for (const c of savedItems) {
+    if (c.kind !== "t3") continue;
+    const p = c.data;
+    if (!p) continue;
+    const post = {
+      title: p.title || "(untitled)",
+      permalink: "https://www.reddit.com" + (p.permalink || ""),
+      subreddit: p.subreddit,
+      id: p.id,
+      created_utc: p.created_utc || 0,
+    };
+
+    if (p.is_gallery && p.gallery_data && p.media_metadata) {
+      for (const item of p.gallery_data.items) {
+        const meta = p.media_metadata[item.media_id];
+        if (!meta || meta.status !== "valid") continue;
+        if (meta.e === "AnimatedImage" && meta.s?.mp4) {
+          out.push({ kind: "gif", url: htmlUnescape(meta.s.mp4), post });
+        } else if (meta.s?.u) {
+          out.push({ kind: "image", url: htmlUnescape(meta.s.u), post });
+        }
+      }
+      continue;
+    }
+
+    if (p.is_video && p.media?.reddit_video?.fallback_url) {
+      out.push({
+        kind: "video",
+        url: htmlUnescape(p.media.reddit_video.fallback_url),
+        poster: p.thumbnail && /^https?:/.test(p.thumbnail) ? p.thumbnail : undefined,
+        post,
+      });
+      continue;
+    }
+
+    const url = p.url_overridden_by_dest || p.url || "";
+    const isGif = /\.gif($|\?)/i.test(url);
+    if (isGif) {
+      const mp4 = p.preview?.reddit_video_preview?.fallback_url;
+      out.push(mp4
+        ? { kind: "gif", url: htmlUnescape(mp4), post }
+        : { kind: "image", url: htmlUnescape(url), post });
+      continue;
+    }
+
+    const isImage =
+      p.post_hint === "image" ||
+      /^https?:\/\/i\.redd\.it\//.test(url) ||
+      /\.(jpg|jpeg|png|webp)($|\?)/i.test(url);
+    if (isImage) {
+      out.push({ kind: "image", url: htmlUnescape(url), post });
+      continue;
+    }
+
+    // External video hosts — prefer the source's own MP4 over Reddit's transcoded preview.
+    // Redgifs: needs API resolution; defer with kind="external".
+    const redgifsId = extractRedgifsId(url);
+    if (redgifsId) {
+      out.push({
+        kind: "external",
+        host: "redgifs",
+        externalId: redgifsId,
+        fallbackUrl: htmlUnescape(p.preview?.reddit_video_preview?.fallback_url || ""),
+        post,
+      });
+      continue;
+    }
+
+    // Imgur .gifv → .mp4 (direct URL rewrite, no API needed).
+    if (/i\.imgur\.com\/.*\.gifv($|\?)/i.test(url)) {
+      out.push({ kind: "video", url: url.replace(/\.gifv/i, ".mp4"), post });
+      continue;
+    }
+
+    // Generic fallback: any external post with Reddit's transcoded MP4 preview.
+    const externalPreview = p.preview?.reddit_video_preview?.fallback_url;
+    if (externalPreview) {
+      out.push({ kind: "video", url: htmlUnescape(externalPreview), post });
+      continue;
+    }
+
+    // Static image preview as a last resort.
+    const imagePreview = p.preview?.images?.[0]?.source?.url;
+    if (imagePreview && /redgifs|gfycat|imgur|i\.redd\.it/i.test(url + " " + imagePreview)) {
+      out.push({ kind: "image", url: htmlUnescape(imagePreview), post });
+    }
+  }
+  return out;
+}
+
+function extractRedgifsId(url) {
+  const m = url.match(/redgifs\.com\/(?:watch|ifr|i)\/([a-zA-Z0-9]+)/);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/* ============================================================
+ * External video host resolution (Redgifs API)
+ * ============================================================ */
+async function getRedgifsToken() {
+  if (window.__rgToken && Date.now() < window.__rgTokenExpiry) return window.__rgToken;
+  const res = await fetch("https://api.redgifs.com/v2/auth/temporary");
+  if (!res.ok) throw new Error("Redgifs auth " + res.status);
+  const data = await res.json();
+  window.__rgToken = data.token;
+  window.__rgTokenExpiry = Date.now() + 50 * 60 * 1000;
+  return data.token;
+}
+
+async function resolveRedgifsUrl(id) {
+  const token = await getRedgifsToken();
+  const res = await fetch(`https://api.redgifs.com/v2/gifs/${id}`, {
+    headers: { "Authorization": "Bearer " + token },
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const urls = data?.gif?.urls;
+  return urls?.hd || urls?.sd || urls?.silent || null;
+}
+
+async function enrichExternalSlides(slides, onProgress) {
+  const externals = [];
+  slides.forEach((s, i) => { if (s.kind === "external") externals.push({ s, i }); });
+  if (!externals.length) return slides;
+
+  const CONCURRENCY = 4;
+  let cursor = 0;
+  let done = 0;
+
+  await Promise.all(Array(CONCURRENCY).fill(0).map(async () => {
+    while (cursor < externals.length) {
+      const item = externals[cursor++];
+      const slide = item.s;
+      try {
+        if (slide.host === "redgifs") {
+          const resolved = await resolveRedgifsUrl(slide.externalId);
+          if (resolved) {
+            slide.kind = "video";
+            slide.url = resolved;
+          } else if (slide.fallbackUrl) {
+            slide.kind = "video";
+            slide.url = slide.fallbackUrl;
+          }
+        }
+      } catch (_) {
+        if (slide.fallbackUrl) {
+          slide.kind = "video";
+          slide.url = slide.fallbackUrl;
+        }
+      }
+      done++;
+      onProgress?.(done, externals.length);
+    }
+  }));
+
+  // Drop anything still unresolved.
+  return slides.filter(s => s.kind !== "external");
+}
+
+/* ============================================================
+ * Cache / panel rendering
+ * ============================================================ */
+function saveCache(cache) {
+  try {
+    localStorage.setItem(LS.SAVED, JSON.stringify(cache));
+  } catch (e) {
+    // Quota — try trimming slides progressively until it fits.
+    const original = cache.slides.length;
+    let slides = cache.slides.slice();
+    while (slides.length > 100) {
+      slides = slides.slice(0, Math.floor(slides.length * 0.8));
+      try {
+        localStorage.setItem(LS.SAVED, JSON.stringify({ ...cache, slides, trimmed: original }));
+        showError(`localStorage quota hit; cached the most recent ${slides.length} of ${original} slides.`);
+        return;
+      } catch (_) { /* keep trimming */ }
+    }
+    showError("Could not save to localStorage (quota too small even after trimming). Slideshow will run from memory only.");
+    window.__memoryCache = cache;
+  }
+}
+
+function loadCache() {
+  if (window.__memoryCache) return window.__memoryCache;
+  const raw = localStorage.getItem(LS.SAVED);
+  return raw ? JSON.parse(raw) : null;
+}
+
+function renderCacheInfo() {
+  const cache = loadCache();
+  if (!cache || !cache.slides) {
+    $("#data-panel").style.display = "none";
+    return null;
+  }
+  const slides = cache.slides;
+  $("#data-panel").style.display = "block";
+  $("#source-name").textContent = `${cache.filename || "(cached)"} · ${formatAge(cache.fetchedAt)} · ${slides.length} slides`;
+
+  const counts = slides.reduce((m, s) => { m[s.kind] = (m[s.kind] || 0) + 1; return m; }, {});
+  $("#stats").innerHTML =
+    `<span class="stat">${slides.length} slides</span>` +
+    `<span class="stat">${counts.image || 0} images</span>` +
+    `<span class="stat">${counts.gif || 0} gifs</span>` +
+    `<span class="stat">${counts.video || 0} videos</span>`;
+  $("#start-btn").disabled = slides.length === 0;
+  return slides;
+}
+
+function reset() {
+  localStorage.removeItem(LS.SAVED);
+  delete window.__memoryCache;
+  $("#errors").innerHTML = "";
+  $("#progress-text").textContent = "";
+  $("#stats").innerHTML = "";
+  $("#csv-file").value = "";
+  $("#data-panel").style.display = "none";
+}
+
+/* ============================================================
+ * Slideshow engine
+ * ============================================================ */
+const Show = {
+  slides: [], order: [], idx: 0,
+  intervalMs: 1000, holdForVideo: true, playing: true,
+  timer: null, progressTimer: null, cursorTimer: null,
+  preloadCache: new Map(),
+
+  start(slides, sortMode = "shuffle") {
+    this.slides = slides;
+    this.sortMode = sortMode;
+    this.order = this.buildOrder(sortMode);
+    this.idx = 0;
+    this.playing = true;
+    this.applyPrefs();
+    $("#stage").classList.add("active");
+    document.documentElement.requestFullscreen?.().catch(() => {});
+    this.show(0);
+    this.bindHotkeys();
+    this.bindCursorHide();
+  },
+
+  buildOrder(mode) {
+    const indices = this.slides.map((_, i) => i);
+    if (mode === "oldest") {
+      return indices.sort((a, b) => (this.slides[a].post.created_utc || 0) - (this.slides[b].post.created_utc || 0));
+    }
+    if (mode === "newest") {
+      return indices.sort((a, b) => (this.slides[b].post.created_utc || 0) - (this.slides[a].post.created_utc || 0));
+    }
+    return shuffle(indices);
+  },
+
+  applyPrefs() {
+    const prefs = JSON.parse(localStorage.getItem(LS.PREFS) || "{}");
+    if (prefs.interval) {
+      this.intervalMs = prefs.interval * 1000;
+      $("#ctrl-interval").value = prefs.interval;
+      $("#interval-label").textContent = prefs.interval.toFixed(1) + "s";
+    }
+    if (typeof prefs.hold === "boolean") {
+      this.holdForVideo = prefs.hold;
+      $("#ctrl-hold").checked = prefs.hold;
+    }
+  },
+
+  savePrefs() {
+    localStorage.setItem(LS.PREFS, JSON.stringify({
+      interval: this.intervalMs / 1000,
+      hold: this.holdForVideo,
+    }));
+  },
+
+  preload(slide) {
+    if (!slide || this.preloadCache.has(slide.url)) return;
+    if (slide.kind === "image") {
+      const img = new Image();
+      img.src = slide.url;
+      this.preloadCache.set(slide.url, img);
+    } else {
+      const v = document.createElement("video");
+      v.preload = "auto";
+      v.src = slide.url;
+      this.preloadCache.set(slide.url, v);
+    }
+    if (this.preloadCache.size > 12) {
+      const firstKey = this.preloadCache.keys().next().value;
+      this.preloadCache.delete(firstKey);
+    }
+  },
+
+  show(i) {
+    this.clearTimers();
+    this.idx = (i + this.order.length) % this.order.length;
+    const slide = this.slides[this.order[this.idx]];
+
+    for (let k = 1; k <= 3; k++) {
+      const nextIdx = (this.idx + k) % this.order.length;
+      this.preload(this.slides[this.order[nextIdx]]);
+    }
+
+    const wrap = $("#media-wrap");
+    wrap.innerHTML = "";
+
+    let durationMs = this.intervalMs;
+
+    if (slide.kind === "image") {
+      const img = document.createElement("img");
+      img.src = slide.url;
+      img.alt = slide.post.title;
+      wrap.appendChild(img);
+    } else {
+      const v = document.createElement("video");
+      v.src = slide.url;
+      v.autoplay = true;
+      v.muted = true;
+      v.playsInline = true;
+      v.loop = false;
+      if (slide.poster) v.poster = slide.poster;
+      wrap.appendChild(v);
+      v.play?.().catch(() => {});
+
+      if (this.holdForVideo) {
+        durationMs = 10_000;
+        v.addEventListener("ended", () => {
+          if (this.playing) this.next();
+        }, { once: true });
+      }
+    }
+
+    $("#post-title").textContent = `[r/${slide.post.subreddit}] ${slide.post.title}`;
+    $("#post-link").href = slide.post.permalink;
+    $("#slide-counter").textContent = `${this.idx + 1} / ${this.order.length}`;
+
+    if (this.playing) this.scheduleAdvance(durationMs);
+  },
+
+  scheduleAdvance(ms) {
+    this.clearTimers();
+    const start = Date.now();
+    const bar = $("#progress");
+    bar.style.width = "0%";
+    this.progressTimer = setInterval(() => {
+      const pct = Math.min(100, ((Date.now() - start) / ms) * 100);
+      bar.style.width = pct + "%";
+    }, 50);
+    this.timer = setTimeout(() => this.next(), ms);
+  },
+
+  clearTimers() {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    if (this.progressTimer) { clearInterval(this.progressTimer); this.progressTimer = null; }
+  },
+
+  next() { this.show(this.idx + 1); },
+  prev() { this.show(this.idx - 1); },
+
+  togglePlay() {
+    this.playing = !this.playing;
+    $("#ctrl-playpause").textContent = this.playing ? "Pause" : "Play";
+    if (this.playing) {
+      this.show(this.idx);
+    } else {
+      this.clearTimers();
+      $("#media-wrap video")?.pause();
+    }
+  },
+
+  reshuffle() {
+    this.order = shuffle(this.slides.map((_, i) => i));
+    this.sortMode = "shuffle";
+    this.idx = 0;
+    this.show(0);
+  },
+
+  exit() {
+    this.clearTimers();
+    this.playing = false;
+    document.exitFullscreen?.().catch(() => {});
+    $("#stage").classList.remove("active");
+    $("#media-wrap").innerHTML = "";
+    document.body.classList.remove("hide-cursor");
+    if (this.cursorTimer) clearTimeout(this.cursorTimer);
+  },
+
+  bindHotkeys() {
+    if (this._hk) return;
+    this._hk = (e) => {
+      if (!$("#stage").classList.contains("active")) return;
+      if (e.key === "ArrowRight") this.next();
+      else if (e.key === "ArrowLeft") this.prev();
+      else if (e.key === " ") { e.preventDefault(); this.togglePlay(); }
+      else if (e.key === "Escape") this.exit();
+    };
+    window.addEventListener("keydown", this._hk);
+  },
+
+  bindCursorHide() {
+    const stage = $("#stage");
+    const onMove = () => {
+      document.body.classList.remove("hide-cursor");
+      if (this.cursorTimer) clearTimeout(this.cursorTimer);
+      this.cursorTimer = setTimeout(() => {
+        if ($("#stage").classList.contains("active")) {
+          document.body.classList.add("hide-cursor");
+        }
+      }, 2000);
+    };
+    stage.addEventListener("mousemove", onMove);
+    onMove();
+  },
+};
+
+/* ============================================================
+ * Wire up
+ * ============================================================ */
+const dropzone = $("#dropzone");
+const fileInput = $("#csv-file");
+
+fileInput.addEventListener("change", (e) => {
+  const f = e.target.files?.[0];
+  if (f) loadFromFile(f);
+});
+
+["dragenter", "dragover"].forEach(ev => {
+  dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add("dragover"); });
+});
+["dragleave", "drop"].forEach(ev => {
+  dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("dragover"); });
+});
+dropzone.addEventListener("drop", (e) => {
+  const f = e.dataTransfer?.files?.[0];
+  if (f) loadFromFile(f);
+});
+
+$("#reset-btn").addEventListener("click", reset);
+$("#export-btn").addEventListener("click", exportCache);
+$("#start-btn").addEventListener("click", () => {
+  const all = renderCacheInfo();
+  if (!all || !all.length) return;
+  const filter = $("#filter-mode").value;
+  let slides = all;
+  if (filter === "image") slides = all.filter(s => s.kind === "image");
+  else if (filter === "video") slides = all.filter(s => s.kind === "video" || s.kind === "gif");
+  else if (filter === "gif") slides = all.filter(s => s.kind === "gif");
+  if (!slides.length) {
+    showError(`No slides match the selected filter (${filter}).`);
+    return;
+  }
+  Show.start(slides, $("#sort-mode").value);
+});
+
+$("#ctrl-prev").addEventListener("click", () => Show.prev());
+$("#ctrl-next").addEventListener("click", () => Show.next());
+$("#ctrl-playpause").addEventListener("click", () => Show.togglePlay());
+$("#ctrl-exit").addEventListener("click", () => Show.exit());
+$("#ctrl-shuffle").addEventListener("click", () => Show.reshuffle());
+$("#ctrl-interval").addEventListener("input", (e) => {
+  const v = parseFloat(e.target.value);
+  Show.intervalMs = v * 1000;
+  $("#interval-label").textContent = v.toFixed(1) + "s";
+  Show.savePrefs();
+});
+$("#ctrl-hold").addEventListener("change", (e) => {
+  Show.holdForVideo = e.target.checked;
+  Show.savePrefs();
+});
+
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement && $("#stage").classList.contains("active")) {
+    Show.exit();
+  }
+});
+
+// Boot — restore cached data if present
+renderCacheInfo();
+</script>
+</body>
+</html>
