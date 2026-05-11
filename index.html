@@ -345,34 +345,50 @@ function fileFingerprint(file) {
   return `${file.name}|${file.size}|${file.lastModified || 0}`;
 }
 
-function addLocalFiles(fileList) {
-  // Store File references only — URLs are materialized lazily by the slideshow
-  // engine to keep iOS memory usage bounded. Skip duplicates by fingerprint.
-  let added = 0, skipped = 0;
-  for (const file of fileList) {
-    if (!/^(image|video)\//.test(file.type)) continue;
-    const fp = fileFingerprint(file);
-    if (window.__localFingerprints.has(fp)) { skipped++; continue; }
-    window.__localFingerprints.add(fp);
-    window.__localSlides.push({
-      kind: /^video\//.test(file.type) ? "video" : "image",
-      file,
-      url: null,
-      fingerprint: fp,
-      post: {
-        title: file.name,
-        permalink: "#",
-        subreddit: "local",
-        id: "local-" + window.__localSlides.length,
-        created_utc: Math.floor((file.lastModified || Date.now()) / 1000),
-      },
-      local: true,
-    });
-    added++;
+async function addLocalFiles(fileList) {
+  // Process in async chunks so the UI thread isn't pegged when the iOS
+  // document picker hands back hundreds of File references. Accessing file.type
+  // / file.size etc. triggers IPC to the file provider — doing it 500x synchronously
+  // makes Safari think the page has hung.
+  const CHUNK = 25;
+  const total = fileList.length;
+  let added = 0, skipped = 0, processed = 0;
+  $("#data-panel").style.display = "block";
+
+  // Snapshot to a plain array — iterating a FileList during long async work is risky.
+  const files = Array.from(fileList);
+
+  for (let start = 0; start < files.length; start += CHUNK) {
+    const end = Math.min(start + CHUNK, files.length);
+    for (let i = start; i < end; i++) {
+      const file = files[i];
+      processed++;
+      if (!file || !/^(image|video)\//.test(file.type || "")) continue;
+      const fp = fileFingerprint(file);
+      if (window.__localFingerprints.has(fp)) { skipped++; continue; }
+      window.__localFingerprints.add(fp);
+      window.__localSlides.push({
+        kind: /^video\//.test(file.type) ? "video" : "image",
+        file,
+        url: null,
+        fingerprint: fp,
+        post: {
+          title: file.name,
+          permalink: "#",
+          subreddit: "local",
+          id: "local-" + window.__localSlides.length,
+          created_utc: Math.floor((file.lastModified || Date.now()) / 1000),
+        },
+        local: true,
+      });
+      added++;
+    }
+    $("#progress-text").textContent = `Loading local files: ${processed} / ${total} (${added} added, ${skipped} duplicates)…`;
+    // Yield to the browser so the UI can repaint and process events.
+    await new Promise(r => setTimeout(r, 0));
   }
-  if (skipped > 0) {
-    $("#progress-text").textContent = `Added ${added} new file(s); skipped ${skipped} duplicate(s).`;
-  }
+
+  $("#progress-text").textContent = `Done. Added ${added} new file(s)${skipped ? `, skipped ${skipped} duplicate(s)` : ""}.`;
   renderLocalList();
   renderCacheInfo();
 }
