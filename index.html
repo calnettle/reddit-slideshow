@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (Reddit OAuth alongside CSV, zip import, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (paste-token bypass, OAuth, CSV, zip import, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -75,6 +75,16 @@
         <span id="redirect-info" class="muted" style="font-size:12px"></span>
       </div>
       <div id="config-warning" class="muted" style="font-size:12px;margin-top:8px"></div>
+      <details style="margin-top:14px">
+        <summary class="muted" style="font-size:12px;cursor:pointer">Or paste an access token from another Reddit app</summary>
+        <div style="margin-top:8px">
+          <textarea id="raw-token-input" rows="3" placeholder="eyJhbGc..." style="width:100%;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:11px"></textarea>
+          <div class="row" style="margin-top:6px">
+            <button id="raw-token-submit">Use this token</button>
+            <span class="muted" style="font-size:12px">Lifetime is decoded from the JWT (usually ~24h). No refresh; re-paste when it expires.</span>
+          </div>
+        </div>
+      </details>
     </div>
     <div id="oauth-signed-in" style="display:none;margin-top:8px">
       <div class="row">
@@ -429,6 +439,48 @@ async function oauthFetchAndProcess() {
 function oauthLogout() {
   localStorage.removeItem(LS.TOKEN);
   localStorage.removeItem(LS.USERNAME);
+  renderOAuthPanel();
+}
+
+function decodeJwtPayload(jwt) {
+  try {
+    const parts = jwt.split(".");
+    if (parts.length !== 3) return null;
+    let p = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (p.length % 4) p += "=";
+    return JSON.parse(atob(p));
+  } catch { return null; }
+}
+
+function injectRawToken() {
+  const raw = ($("#raw-token-input").value || "").trim();
+  if (!raw) {
+    showError("Paste the full access token first.");
+    return;
+  }
+  const payload = decodeJwtPayload(raw);
+  if (!payload) {
+    showError("Couldn't decode that as a JWT. Make sure you pasted the whole token (three dot-separated parts).");
+    return;
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expiresIn = payload.exp ? Math.max(60, Math.floor(payload.exp - nowSec)) : 3600;
+  if (payload.exp && payload.exp < nowSec) {
+    showError(`This token expired ${Math.floor((nowSec - payload.exp) / 60)} minutes ago. Grab a fresh one.`);
+    return;
+  }
+  const tok = {
+    access_token: raw,
+    token_type: "bearer",
+    expires_in: expiresIn,
+    scope: "identity history",
+    refresh_token: null,
+    obtainedAt: Date.now(),
+  };
+  localStorage.setItem(LS.TOKEN, JSON.stringify(tok));
+  localStorage.removeItem(LS.USERNAME);
+  $("#raw-token-input").value = "";
+  $("#progress-text").textContent = `Token injected (expires in ~${Math.round(expiresIn / 3600)}h). Click "Fetch saved posts".`;
   renderOAuthPanel();
 }
 
@@ -1267,6 +1319,7 @@ dropzone.addEventListener("drop", (e) => {
 $("#oauth-login-btn").addEventListener("click", startOAuthLogin);
 $("#oauth-logout-btn").addEventListener("click", oauthLogout);
 $("#oauth-fetch-btn").addEventListener("click", oauthFetchAndProcess);
+$("#raw-token-submit").addEventListener("click", injectRawToken);
 
 $("#local-files").addEventListener("change", (e) => {
   if (e.target.files?.length) loadLocalFilesOrZips(e.target.files);
