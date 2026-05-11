@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (HTML export import, CSV URL fallback, paste-token, OAuth, zip import, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (CORS-proxy gallery expansion, HTML export import, CSV URL fallback, paste-token, OAuth, zip import, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -117,6 +117,10 @@
         <option value="0">All</option>
       </select>
       <span class="muted" style="font-size:12px">Reddit's GDPR CSV is ordered newest-first, so the limit takes the most recently saved posts.</span>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label><input type="checkbox" id="expand-galleries"> Expand Reddit galleries via public CORS proxy</label>
+      <span class="muted" style="font-size:12px">Routes Reddit JSON through corsproxy.io. ~1s per gallery; can be slow with hundreds.</span>
     </div>
 
     <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:16px">
@@ -654,6 +658,57 @@ async function loadFromFile(file) {
   return loadFromCSV(file);
 }
 
+const CORS_PROXY = "https://corsproxy.io/?url=";
+
+async function fetchRedditPostViaProxy(postId) {
+  const target = `https://www.reddit.com/comments/${postId}.json?raw_json=1`;
+  const url = CORS_PROXY + encodeURIComponent(target);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) return null;
+    const data = await res.json();
+    // /comments/X.json returns [postListing, commentsListing]
+    return data?.[0]?.data?.children?.[0]?.data || null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function gallerySlidesFromPost(redditPost, postInfo) {
+  const slides = [];
+  if (!redditPost?.is_gallery || !redditPost.gallery_data || !redditPost.media_metadata) return slides;
+  for (const item of redditPost.gallery_data.items) {
+    const meta = redditPost.media_metadata[item.media_id];
+    if (!meta || meta.status !== "valid") continue;
+    if (meta.e === "AnimatedImage" && meta.s?.mp4) {
+      slides.push({ kind: "gif", url: htmlUnescape(meta.s.mp4), post: postInfo });
+    } else if (meta.s?.u) {
+      slides.push({ kind: "image", url: htmlUnescape(meta.s.u), post: postInfo });
+    }
+  }
+  return slides;
+}
+
+async function expandGalleriesViaProxy(galleryItems, onProgress) {
+  const out = [];
+  let done = 0;
+  for (const item of galleryItems) {
+    const post = await fetchRedditPostViaProxy(item.id);
+    if (post) {
+      const slides = gallerySlidesFromPost(post, item.post);
+      out.push(...slides);
+    }
+    done++;
+    onProgress?.(done, galleryItems.length, out.length);
+    await new Promise(r => setTimeout(r, 700)); // throttle proxy
+  }
+  return out;
+}
+
 async function loadFromHTML(file) {
   $("#errors").innerHTML = "";
   $("#progress-text").textContent = "Parsing HTML export…";
@@ -662,8 +717,8 @@ async function loadFromHTML(file) {
     const text = await file.text();
     const doc = new DOMParser().parseFromString(text, "text/html");
     const slides = [];
+    const galleryItems = []; // { id, post } for later expansion
     let currentSubreddit = "unknown";
-    let skippedGalleries = 0;
     let skippedOther = 0;
     let totalLis = 0;
 
@@ -688,9 +743,17 @@ async function loadFromHTML(file) {
         const id = idMatch ? idMatch[1] : null;
         if (!id) { skippedOther++; continue; }
 
-        // Galleries need Reddit API to expand — skip and tally.
+        // Galleries: collect for optional expansion via CORS proxy.
         if (/reddit\.com\/gallery\//i.test(mediaUrl)) {
-          skippedGalleries++;
+          const galId = mediaUrl.match(/gallery\/([a-z0-9]+)/i)?.[1] || id;
+          galleryItems.push({
+            id: galId,
+            post: {
+              title, subreddit: currentSubreddit, id: galId,
+              permalink: permalink.startsWith("http") ? permalink : "https://www.reddit.com" + permalink,
+              created_utc: 0,
+            },
+          });
           continue;
         }
 
@@ -706,10 +769,22 @@ async function loadFromHTML(file) {
       }
     }
 
-    if (!slides.length) {
-      showError(`Parsed ${totalLis} posts but none had usable direct media URLs. ${skippedGalleries} galleries and ${skippedOther} other links were skipped.`);
+    if (!slides.length && !galleryItems.length) {
+      showError(`Parsed ${totalLis} posts but none had usable direct media URLs. ${skippedOther} other links were skipped.`);
       $("#progress-text").textContent = "";
       return;
+    }
+
+    // Optional gallery expansion via CORS proxy.
+    const expand = $("#expand-galleries")?.checked;
+    let gallerySlidesAdded = 0;
+    if (expand && galleryItems.length > 0) {
+      $("#progress-text").textContent = `Expanding ${galleryItems.length} galleries via CORS proxy…`;
+      const gallerySlides = await expandGalleriesViaProxy(galleryItems, (n, total, slidesSoFar) => {
+        $("#progress-text").textContent = `Expanding galleries: ${n} / ${total} (${slidesSoFar} slides so far)…`;
+      });
+      gallerySlidesAdded = gallerySlides.length;
+      slides.push(...gallerySlides);
     }
 
     // Resolve Redgifs.
@@ -723,7 +798,12 @@ async function loadFromHTML(file) {
     }
 
     saveCache({ fetchedAt: Date.now(), slides: finalSlides, filename: file.name });
-    $("#progress-text").textContent = `Done. ${totalLis} posts → ${finalSlides.length} media slides. ${skippedGalleries} galleries skipped (need Reddit API to expand). ${skippedOther} non-media skipped.`;
+    const galleryNote = galleryItems.length === 0
+      ? ""
+      : expand
+        ? ` ${gallerySlidesAdded} slides from ${galleryItems.length} galleries.`
+        : ` ${galleryItems.length} galleries skipped — tick "Expand Reddit galleries" and re-upload to fetch them.`;
+    $("#progress-text").textContent = `Done. ${totalLis} posts → ${finalSlides.length} media slides.${galleryNote} ${skippedOther} non-media skipped.`;
     renderCacheInfo();
   } catch (e) {
     showError(`Failed to parse HTML: ${e.message}`);
