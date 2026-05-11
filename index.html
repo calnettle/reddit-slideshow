@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Reddit Saved Slideshow</title>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <style>
   :root {
     --bg: #0b0b0d;
@@ -63,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (local files lazy-load + dedup + chunked import, Redgifs API, sort/filter, cache export/import)</p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (zip import for large libraries, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
 
   <div id="upload-panel" class="panel">
     <ol style="margin-top:0">
@@ -90,9 +91,12 @@
     <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:16px">
       <strong>Or pick photos/videos from this device:</strong>
       <div style="margin-top:8px">
-        <input id="local-files" type="file" multiple accept="image/*,video/*">
+        <input id="local-files" type="file" multiple accept="image/*,video/*,.zip,application/zip">
       </div>
-      <div class="muted" style="font-size:12px;margin-top:6px">Files stay on your device. Session-only — cleared on page reload (they can't be saved to the cache because blob URLs aren't persistent).</div>
+      <div class="muted" style="font-size:12px;margin-top:6px">
+        Files stay on your device. Session-only — cleared on page reload.<br>
+        <strong>Large libraries (500+ files):</strong> on iOS the system picker hangs above ~250 selections. Zip your folder first (Finder → right-click → Compress / Files app → long-press → Compress) and pick the single <code>.zip</code> here. The page unpacks it in-browser.
+      </div>
       <div id="local-list" class="muted" style="font-size:12px;margin-top:6px"></div>
     </div>
   </div>
@@ -402,6 +406,68 @@ function clearLocalFiles() {
   window.__localFingerprints = new Set();
   renderLocalList();
   renderCacheInfo();
+}
+
+async function loadLocalFilesOrZips(fileList) {
+  // Split incoming files into zips vs direct media. Zips get extracted first.
+  const direct = [];
+  const zips = [];
+  for (const f of fileList) {
+    if (/\.zip$/i.test(f.name) || f.type === "application/zip") zips.push(f);
+    else direct.push(f);
+  }
+  for (const zipFile of zips) {
+    await loadFromZip(zipFile);
+  }
+  if (direct.length) await addLocalFiles(direct);
+}
+
+async function loadFromZip(zipFile) {
+  if (typeof JSZip === "undefined") {
+    showError("JSZip didn't load (check your internet connection on first load).");
+    return;
+  }
+  $("#data-panel").style.display = "block";
+  $("#progress-text").textContent = `Reading ${zipFile.name}…`;
+  try {
+    const zip = await JSZip.loadAsync(zipFile);
+    const allEntries = Object.values(zip.files).filter(e => !e.dir);
+    const mediaEntries = allEntries.filter(e => /\.(jpe?g|png|webp|gif|mp4|webm|mov|m4v|m4a)$/i.test(e.name) && !/__MACOSX/.test(e.name));
+    if (!mediaEntries.length) {
+      showError(`No images or videos found inside ${zipFile.name}.`);
+      $("#progress-text").textContent = "";
+      return;
+    }
+
+    const mimeMap = {
+      jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+      webp: "image/webp", gif: "image/gif",
+      mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", m4v: "video/mp4",
+    };
+    const extracted = [];
+    let processed = 0;
+    for (const entry of mediaEntries) {
+      const blob = await entry.async("blob");
+      const baseName = entry.name.split("/").pop();
+      const ext = (baseName.split(".").pop() || "").toLowerCase();
+      const type = mimeMap[ext] || blob.type || "application/octet-stream";
+      const file = new File([blob], baseName, {
+        type,
+        lastModified: entry.date ? entry.date.getTime() : Date.now(),
+      });
+      extracted.push(file);
+      processed++;
+      if (processed % 20 === 0) {
+        $("#progress-text").textContent = `Extracting ${zipFile.name}: ${processed} / ${mediaEntries.length}…`;
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+    $("#progress-text").textContent = `Extracted ${extracted.length} file(s) from ${zipFile.name}. Adding to slideshow…`;
+    await addLocalFiles(extracted);
+  } catch (e) {
+    showError(`Failed to read zip: ${e.message}`);
+    $("#progress-text").textContent = "";
+  }
 }
 
 function materializeSlideUrl(slide) {
@@ -947,7 +1013,7 @@ dropzone.addEventListener("drop", (e) => {
 });
 
 $("#local-files").addEventListener("change", (e) => {
-  if (e.target.files?.length) addLocalFiles(e.target.files);
+  if (e.target.files?.length) loadLocalFilesOrZips(e.target.files);
 });
 
 $("#reset-btn").addEventListener("click", reset);
