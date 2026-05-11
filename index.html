@@ -339,13 +339,26 @@ async function loadFromJSON(file) {
  * ============================================================ */
 window.__localSlides = window.__localSlides || [];
 
+window.__localFingerprints = window.__localFingerprints || new Set();
+
+function fileFingerprint(file) {
+  return `${file.name}|${file.size}|${file.lastModified || 0}`;
+}
+
 function addLocalFiles(fileList) {
+  // Store File references only — URLs are materialized lazily by the slideshow
+  // engine to keep iOS memory usage bounded. Skip duplicates by fingerprint.
+  let added = 0, skipped = 0;
   for (const file of fileList) {
     if (!/^(image|video)\//.test(file.type)) continue;
-    const url = URL.createObjectURL(file);
+    const fp = fileFingerprint(file);
+    if (window.__localFingerprints.has(fp)) { skipped++; continue; }
+    window.__localFingerprints.add(fp);
     window.__localSlides.push({
       kind: /^video\//.test(file.type) ? "video" : "image",
-      url,
+      file,
+      url: null,
+      fingerprint: fp,
       post: {
         title: file.name,
         permalink: "#",
@@ -355,16 +368,32 @@ function addLocalFiles(fileList) {
       },
       local: true,
     });
+    added++;
+  }
+  if (skipped > 0) {
+    $("#progress-text").textContent = `Added ${added} new file(s); skipped ${skipped} duplicate(s).`;
   }
   renderLocalList();
   renderCacheInfo();
 }
 
 function clearLocalFiles() {
-  for (const s of window.__localSlides) URL.revokeObjectURL(s.url);
+  for (const s of window.__localSlides) {
+    if (s.url) URL.revokeObjectURL(s.url);
+  }
   window.__localSlides = [];
+  window.__localFingerprints = new Set();
   renderLocalList();
   renderCacheInfo();
+}
+
+function materializeSlideUrl(slide) {
+  if (slide.url) return slide.url;
+  if (slide.file) {
+    slide.url = URL.createObjectURL(slide.file);
+    return slide.url;
+  }
+  return null;
 }
 
 function renderLocalList() {
@@ -722,20 +751,28 @@ const Show = {
   },
 
   preload(slide) {
-    if (!slide || this.preloadCache.has(slide.url)) return;
+    if (!slide) return;
+    materializeSlideUrl(slide);
+    if (!slide.url) return;
+    if (this.preloadCache.has(slide)) return;
+    let el;
     if (slide.kind === "image") {
-      const img = new Image();
-      img.src = slide.url;
-      this.preloadCache.set(slide.url, img);
+      el = new Image();
+      el.src = slide.url;
     } else {
-      const v = document.createElement("video");
-      v.preload = "auto";
-      v.src = slide.url;
-      this.preloadCache.set(slide.url, v);
+      el = document.createElement("video");
+      el.preload = "auto";
+      el.src = slide.url;
     }
-    if (this.preloadCache.size > 12) {
-      const firstKey = this.preloadCache.keys().next().value;
-      this.preloadCache.delete(firstKey);
+    this.preloadCache.set(slide, el);
+    // Evict oldest if over capacity; revoke blob URLs for local slides to free memory.
+    while (this.preloadCache.size > 8) {
+      const oldest = this.preloadCache.keys().next().value;
+      this.preloadCache.delete(oldest);
+      if (oldest.local && oldest.url) {
+        URL.revokeObjectURL(oldest.url);
+        oldest.url = null;
+      }
     }
   },
 
@@ -743,6 +780,7 @@ const Show = {
     this.clearTimers();
     this.idx = (i + this.order.length) % this.order.length;
     const slide = this.slides[this.order[this.idx]];
+    materializeSlideUrl(slide);
 
     for (let k = 1; k <= 3; k++) {
       const nextIdx = (this.idx + k) % this.order.length;
@@ -831,6 +869,14 @@ const Show = {
     $("#media-wrap").innerHTML = "";
     document.body.classList.remove("hide-cursor");
     if (this.cursorTimer) clearTimeout(this.cursorTimer);
+    // Release any blob URLs held by the preload cache.
+    for (const slide of this.preloadCache.keys()) {
+      if (slide.local && slide.url) {
+        URL.revokeObjectURL(slide.url);
+        slide.url = null;
+      }
+    }
+    this.preloadCache.clear();
   },
 
   bindHotkeys() {
