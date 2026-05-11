@@ -64,10 +64,31 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (zip import for large libraries, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (Reddit OAuth alongside CSV, zip import, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
+
+  <div id="oauth-panel" class="panel">
+    <strong>Option A — Live Reddit (OAuth):</strong>
+    <div id="oauth-signed-out" style="margin-top:8px">
+      <p class="muted" style="margin:6px 0">Connect your Reddit account to pull saved posts directly. Requires an "installed app" registered at <a href="https://www.reddit.com/prefs/apps" target="_blank" rel="noopener">reddit.com/prefs/apps</a> with this page's URL as redirect URI.</p>
+      <div class="row">
+        <button id="oauth-login-btn" class="primary">Connect Reddit</button>
+        <span id="redirect-info" class="muted" style="font-size:12px"></span>
+      </div>
+      <div id="config-warning" class="muted" style="font-size:12px;margin-top:8px"></div>
+    </div>
+    <div id="oauth-signed-in" style="display:none;margin-top:8px">
+      <div class="row">
+        <span>Signed in as <strong id="oauth-username">…</strong></span>
+        <span class="grow"></span>
+        <button id="oauth-fetch-btn" class="primary">Fetch saved posts</button>
+        <button id="oauth-logout-btn">Sign out</button>
+      </div>
+    </div>
+  </div>
 
   <div id="upload-panel" class="panel">
-    <ol style="margin-top:0">
+    <strong>Option B — GDPR CSV (no API approval needed):</strong>
+    <ol style="margin-top:8px">
       <li>Request your data at <a href="https://www.reddit.com/settings/data-request" target="_blank" rel="noopener">reddit.com/settings/data-request</a> → wait for the email (usually a few hours).</li>
       <li>Unzip the export and find <code>saved_posts.csv</code>.</li>
       <li>Drop it below.</li>
@@ -159,7 +180,23 @@
 const LS = {
   SAVED: "rss.saved",   // { fetchedAt, items: [...], filename }
   PREFS: "rss.prefs",   // { interval, hold }
+  TOKEN: "rss.token",
+  USERNAME: "rss.username",
+  OAUTH_STATE: "rss.oauth_state",
+  PKCE_VERIFIER: "rss.pkce_verifier",
 };
+
+const CONFIG = {
+  // Paste the 14-char client ID from your "installed app" at reddit.com/prefs/apps.
+  CLIENT_ID: "<PASTE_CLIENT_ID_HERE>",
+  SCOPES: "identity history",
+  USER_AGENT: "calnetcorp-reddit-slideshow/0.1",
+};
+
+function getRedirectUri() {
+  // Strip query/hash so the URI matches exactly across the OAuth round-trip.
+  return window.location.origin + window.location.pathname;
+}
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -193,6 +230,221 @@ function formatAge(ts) {
   if (s < 3600) return `${Math.floor(s/60)}m ago`;
   if (s < 86400) return `${Math.floor(s/3600)}h ago`;
   return `${Math.floor(s/86400)}d ago`;
+}
+
+/* ============================================================
+ * Reddit OAuth (installed app + PKCE)
+ * ============================================================ */
+function rngBytes(n) {
+  const a = new Uint8Array(n);
+  crypto.getRandomValues(a);
+  return a;
+}
+function base64url(buf) {
+  const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : buf;
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+async function sha256(str) {
+  return crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+}
+
+function oauthConfigured() {
+  return CONFIG.CLIENT_ID && !CONFIG.CLIENT_ID.startsWith("<PASTE");
+}
+
+async function startOAuthLogin() {
+  if (!oauthConfigured()) {
+    showError("CLIENT_ID isn't set. Paste it into the CONFIG block at the top of index.html.");
+    return;
+  }
+  const state = base64url(rngBytes(16));
+  const verifier = base64url(rngBytes(48));
+  const challenge = base64url(await sha256(verifier));
+  localStorage.setItem(LS.OAUTH_STATE, state);
+  localStorage.setItem(LS.PKCE_VERIFIER, verifier);
+
+  const params = new URLSearchParams({
+    client_id: CONFIG.CLIENT_ID,
+    response_type: "code",
+    state,
+    redirect_uri: getRedirectUri(),
+    duration: "permanent",
+    scope: CONFIG.SCOPES,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+  });
+  window.location.href = "https://www.reddit.com/api/v1/authorize?" + params.toString();
+}
+
+async function handleOAuthCallback() {
+  const url = new URL(window.location.href);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  const err = url.searchParams.get("error");
+  if (err) {
+    showError("OAuth error: " + err);
+    history.replaceState({}, "", url.pathname);
+    return false;
+  }
+  if (!code) return false;
+
+  const expected = localStorage.getItem(LS.OAUTH_STATE);
+  if (!expected || state !== expected) {
+    showError("OAuth state mismatch — aborting.");
+    history.replaceState({}, "", url.pathname);
+    return false;
+  }
+  const verifier = localStorage.getItem(LS.PKCE_VERIFIER) || "";
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: getRedirectUri(),
+    code_verifier: verifier,
+  });
+  const res = await fetch("https://www.reddit.com/api/v1/access_token", {
+    method: "POST",
+    headers: {
+      "Authorization": "Basic " + btoa(CONFIG.CLIENT_ID + ":"),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: body.toString(),
+  });
+  if (!res.ok) {
+    showError(`Token exchange failed (${res.status}): ${await res.text()}`);
+    history.replaceState({}, "", url.pathname);
+    return false;
+  }
+  const tok = await res.json();
+  tok.obtainedAt = Date.now();
+  localStorage.setItem(LS.TOKEN, JSON.stringify(tok));
+  localStorage.removeItem(LS.OAUTH_STATE);
+  localStorage.removeItem(LS.PKCE_VERIFIER);
+  history.replaceState({}, "", url.pathname);
+  return true;
+}
+
+async function refreshOAuthToken() {
+  const raw = localStorage.getItem(LS.TOKEN);
+  if (!raw) return null;
+  const tok = JSON.parse(raw);
+  if (!tok.refresh_token) return null;
+  const res = await fetch("https://www.reddit.com/api/v1/access_token", {
+    method: "POST",
+    headers: {
+      "Authorization": "Basic " + btoa(CONFIG.CLIENT_ID + ":"),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: tok.refresh_token }).toString(),
+  });
+  if (!res.ok) {
+    showError("Token refresh failed — sign in again.");
+    localStorage.removeItem(LS.TOKEN);
+    return null;
+  }
+  const newTok = await res.json();
+  newTok.refresh_token = newTok.refresh_token || tok.refresh_token;
+  newTok.obtainedAt = Date.now();
+  localStorage.setItem(LS.TOKEN, JSON.stringify(newTok));
+  return newTok;
+}
+
+async function getValidToken() {
+  const raw = localStorage.getItem(LS.TOKEN);
+  if (!raw) return null;
+  let tok = JSON.parse(raw);
+  const expiresAt = (tok.obtainedAt || 0) + (tok.expires_in || 3600) * 1000;
+  if (Date.now() > expiresAt - 60_000) tok = await refreshOAuthToken();
+  return tok;
+}
+
+async function redditFetch(path) {
+  const tok = await getValidToken();
+  if (!tok) throw new Error("Not authenticated");
+  const res = await fetch("https://oauth.reddit.com" + path, {
+    headers: {
+      "Authorization": `Bearer ${tok.access_token}`,
+      "X-User-Agent": CONFIG.USER_AGENT,
+    },
+  });
+  if (!res.ok) throw new Error(`Reddit API ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
+async function fetchMe() {
+  const me = await redditFetch("/api/v1/me");
+  localStorage.setItem(LS.USERNAME, me.name);
+  return me;
+}
+
+async function fetchAllSavedViaOAuth(onProgress) {
+  const username = localStorage.getItem(LS.USERNAME);
+  if (!username) throw new Error("No username — call fetchMe() first.");
+  const items = [];
+  let after = null, page = 0;
+  while (true) {
+    page++;
+    const qs = new URLSearchParams({ limit: "100", raw_json: "1" });
+    if (after) qs.set("after", after);
+    const data = await redditFetch(`/user/${username}/saved?` + qs.toString());
+    const children = data?.data?.children || [];
+    for (const c of children) items.push(c);
+    onProgress?.(items.length, page);
+    after = data?.data?.after;
+    if (!after || children.length === 0) break;
+  }
+  return items;
+}
+
+async function oauthFetchAndProcess() {
+  $("#errors").innerHTML = "";
+  $("#progress-text").textContent = "Fetching saved posts from Reddit…";
+  $("#oauth-fetch-btn").disabled = true;
+  try {
+    if (!localStorage.getItem(LS.USERNAME)) await fetchMe();
+    renderOAuthPanel();
+    const items = await fetchAllSavedViaOAuth((n, page) => {
+      $("#progress-text").textContent = `Fetched ${n} items (page ${page})…`;
+    });
+    let slides = expandToSlides(items);
+    const externalCount = slides.filter(s => s.kind === "external").length;
+    if (externalCount > 0) {
+      $("#progress-text").textContent = `Resolving ${externalCount} external videos (Redgifs)…`;
+      slides = await enrichExternalSlides(slides, (n, total) => {
+        $("#progress-text").textContent = `Resolving external videos: ${n} / ${total}…`;
+      });
+    }
+    saveCache({ fetchedAt: Date.now(), slides, filename: `reddit:${localStorage.getItem(LS.USERNAME)}` });
+    $("#progress-text").textContent = `Done. ${items.length} posts → ${slides.length} media slides.`;
+    renderCacheInfo();
+  } catch (e) {
+    showError(e.message);
+    $("#progress-text").textContent = "";
+  } finally {
+    $("#oauth-fetch-btn").disabled = false;
+  }
+}
+
+function oauthLogout() {
+  localStorage.removeItem(LS.TOKEN);
+  localStorage.removeItem(LS.USERNAME);
+  renderOAuthPanel();
+}
+
+function renderOAuthPanel() {
+  $("#redirect-info").textContent = `Redirect URI: ${getRedirectUri()}`;
+  if (!oauthConfigured()) {
+    $("#config-warning").innerHTML = `<strong style="color:#ffb4b4">CLIENT_ID not set.</strong> Paste it into the CONFIG block in the source — clicking "Connect Reddit" without it will just show an error.`;
+  } else {
+    $("#config-warning").textContent = "";
+  }
+  const hasToken = !!localStorage.getItem(LS.TOKEN);
+  $("#oauth-signed-out").style.display = hasToken ? "none" : "block";
+  $("#oauth-signed-in").style.display = hasToken ? "block" : "none";
+  if (hasToken) {
+    $("#oauth-username").textContent = localStorage.getItem(LS.USERNAME) || "(loading…)";
+  }
 }
 
 /* ============================================================
@@ -1012,6 +1264,10 @@ dropzone.addEventListener("drop", (e) => {
   if (f) loadFromFile(f);
 });
 
+$("#oauth-login-btn").addEventListener("click", startOAuthLogin);
+$("#oauth-logout-btn").addEventListener("click", oauthLogout);
+$("#oauth-fetch-btn").addEventListener("click", oauthFetchAndProcess);
+
 $("#local-files").addEventListener("change", (e) => {
   if (e.target.files?.length) loadLocalFilesOrZips(e.target.files);
 });
@@ -1055,8 +1311,18 @@ document.addEventListener("fullscreenchange", () => {
   }
 });
 
-// Boot — restore cached data if present
-renderCacheInfo();
+// Boot
+(async function boot() {
+  const u = new URL(location.href);
+  if (u.searchParams.has("code") || u.searchParams.has("error")) {
+    const ok = await handleOAuthCallback();
+    if (ok) {
+      try { await fetchMe(); } catch (e) { showError(e.message); }
+    }
+  }
+  renderOAuthPanel();
+  renderCacheInfo();
+})();
 </script>
 </body>
 </html>
