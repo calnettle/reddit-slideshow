@@ -877,7 +877,7 @@ async function loadFromCSV(file) {
     } catch (apiErr) {
       // CORS / network failure on Reddit's anonymous API. Fall back to building
       // slides directly from the CSV's url column for rows that have one.
-      const hasUrlColumn = rows.length > 0 && "url" in rows[0];
+      const hasUrlColumn = limitedRows.length > 0 && "url" in limitedRows[0];
       if (!hasUrlColumn) throw apiErr;
       console.warn("Reddit API failed; falling back to CSV url column:", apiErr.message);
       usedFallback = true;
