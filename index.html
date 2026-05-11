@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (CSV URL fallback when Reddit API is CORS-blocked, paste-token, OAuth, zip import, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (HTML export import, CSV URL fallback, paste-token, OAuth, zip import, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -104,8 +104,8 @@
       <li>Drop it below.</li>
     </ol>
     <label class="dropzone" id="dropzone">
-      <input id="csv-file" type="file" accept=".csv,text/csv,.json,application/json">
-      <div><strong>Click to choose</strong> or drag <code>saved_posts.csv</code> (fresh) or <code>cache.json</code> (previously exported) here</div>
+      <input id="csv-file" type="file" accept=".csv,text/csv,.json,application/json,.html,text/html">
+      <div><strong>Click to choose</strong> or drag <code>saved_posts.csv</code>, <code>reddit_export.html</code>, or <code>cache.json</code> here</div>
       <div class="muted" style="margin-top:6px;font-size:12px">Posts in private/quarantined subs are skipped. Reddit's public JSON endpoints are rate-limited; large exports take a minute.</div>
     </label>
     <div class="row" style="margin-top:12px">
@@ -649,9 +649,86 @@ async function fetchPostsByIds(ids, onProgress, existing = []) {
 }
 
 async function loadFromFile(file) {
-  const isJson = /\.json$/i.test(file.name) || file.type === "application/json";
-  if (isJson) return loadFromJSON(file);
+  if (/\.json$/i.test(file.name) || file.type === "application/json") return loadFromJSON(file);
+  if (/\.html?$/i.test(file.name) || file.type === "text/html") return loadFromHTML(file);
   return loadFromCSV(file);
+}
+
+async function loadFromHTML(file) {
+  $("#errors").innerHTML = "";
+  $("#progress-text").textContent = "Parsing HTML export…";
+  $("#data-panel").style.display = "block";
+  try {
+    const text = await file.text();
+    const doc = new DOMParser().parseFromString(text, "text/html");
+    const slides = [];
+    let currentSubreddit = "unknown";
+    let skippedGalleries = 0;
+    let skippedOther = 0;
+    let totalLis = 0;
+
+    // Walk in document order. Some exports wrap in a real body; some are bare fragments.
+    const root = doc.body && doc.body.children.length ? doc.body : doc;
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
+    let n;
+    while ((n = walker.nextNode())) {
+      const tag = n.tagName?.toLowerCase();
+      if (tag === "h2") {
+        currentSubreddit = (n.textContent || "").trim() || currentSubreddit;
+      } else if (tag === "li") {
+        totalLis++;
+        const anchors = n.querySelectorAll("a");
+        if (!anchors.length) { skippedOther++; continue; }
+        const mediaA = anchors[0];
+        const threadA = anchors.length > 1 ? anchors[1] : null;
+        const mediaUrl = (mediaA.getAttribute("href") || "").trim();
+        const title = (mediaA.textContent || "").trim();
+        const permalink = (threadA?.getAttribute("href") || mediaUrl || "").trim();
+        const idMatch = permalink.match(/\/comments\/([a-z0-9]+)/i);
+        const id = idMatch ? idMatch[1] : null;
+        if (!id) { skippedOther++; continue; }
+
+        // Galleries need Reddit API to expand — skip and tally.
+        if (/reddit\.com\/gallery\//i.test(mediaUrl)) {
+          skippedGalleries++;
+          continue;
+        }
+
+        const slide = slideFromCsvRowDirect({
+          id, url: mediaUrl, subreddit: currentSubreddit, title,
+        });
+        if (slide) {
+          slide.post.permalink = permalink.startsWith("http") ? permalink : "https://www.reddit.com" + permalink;
+          slides.push(slide);
+        } else {
+          skippedOther++;
+        }
+      }
+    }
+
+    if (!slides.length) {
+      showError(`Parsed ${totalLis} posts but none had usable direct media URLs. ${skippedGalleries} galleries and ${skippedOther} other links were skipped.`);
+      $("#progress-text").textContent = "";
+      return;
+    }
+
+    // Resolve Redgifs.
+    const externalCount = slides.filter(s => s.kind === "external").length;
+    let finalSlides = slides;
+    if (externalCount > 0) {
+      $("#progress-text").textContent = `Resolving ${externalCount} external videos (Redgifs)…`;
+      finalSlides = await enrichExternalSlides(slides, (n, total) => {
+        $("#progress-text").textContent = `Resolving external videos: ${n} / ${total}…`;
+      });
+    }
+
+    saveCache({ fetchedAt: Date.now(), slides: finalSlides, filename: file.name });
+    $("#progress-text").textContent = `Done. ${totalLis} posts → ${finalSlides.length} media slides. ${skippedGalleries} galleries skipped (need Reddit API to expand). ${skippedOther} non-media skipped.`;
+    renderCacheInfo();
+  } catch (e) {
+    showError(`Failed to parse HTML: ${e.message}`);
+    $("#progress-text").textContent = "";
+  }
 }
 
 async function loadFromJSON(file) {
