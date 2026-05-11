@@ -85,6 +85,15 @@
       </select>
       <span class="muted" style="font-size:12px">Reddit's GDPR CSV is ordered newest-first, so the limit takes the most recently saved posts.</span>
     </div>
+
+    <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:16px">
+      <strong>Or pick photos/videos from this device:</strong>
+      <div style="margin-top:8px">
+        <input id="local-files" type="file" multiple accept="image/*,video/*">
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:6px">Files stay on your device. Session-only — cleared on page reload (they can't be saved to the cache because blob URLs aren't persistent).</div>
+      <div id="local-list" class="muted" style="font-size:12px;margin-top:6px"></div>
+    </div>
   </div>
 
   <div id="data-panel" class="panel" style="display:none">
@@ -323,6 +332,55 @@ async function loadFromJSON(file) {
     showError(e.message);
     $("#progress-text").textContent = "";
   }
+}
+
+/* ============================================================
+ * Local files — session-only blob-URL slides
+ * ============================================================ */
+window.__localSlides = window.__localSlides || [];
+
+function addLocalFiles(fileList) {
+  for (const file of fileList) {
+    if (!/^(image|video)\//.test(file.type)) continue;
+    const url = URL.createObjectURL(file);
+    window.__localSlides.push({
+      kind: /^video\//.test(file.type) ? "video" : "image",
+      url,
+      post: {
+        title: file.name,
+        permalink: "#",
+        subreddit: "local",
+        id: "local-" + window.__localSlides.length,
+        created_utc: Math.floor((file.lastModified || Date.now()) / 1000),
+      },
+      local: true,
+    });
+  }
+  renderLocalList();
+  renderCacheInfo();
+}
+
+function clearLocalFiles() {
+  for (const s of window.__localSlides) URL.revokeObjectURL(s.url);
+  window.__localSlides = [];
+  renderLocalList();
+  renderCacheInfo();
+}
+
+function renderLocalList() {
+  const n = window.__localSlides.length;
+  const el = $("#local-list");
+  if (!el) return;
+  if (n === 0) { el.textContent = ""; return; }
+  const counts = window.__localSlides.reduce((m, s) => { m[s.kind] = (m[s.kind] || 0) + 1; return m; }, {});
+  el.innerHTML = `${n} local file(s) loaded: ${counts.image || 0} images, ${counts.video || 0} videos. <a href="#" id="local-clear">Clear</a>`;
+  $("#local-clear").addEventListener("click", (e) => { e.preventDefault(); clearLocalFiles(); });
+}
+
+function getAllSlides() {
+  const cache = loadCache();
+  const cacheSlides = cache?.slides || [];
+  return cacheSlides.concat(window.__localSlides || []);
 }
 
 function exportCache() {
@@ -572,13 +630,20 @@ function loadCache() {
 
 function renderCacheInfo() {
   const cache = loadCache();
-  if (!cache || !cache.slides) {
+  const cacheSlides = cache?.slides || [];
+  const localSlides = window.__localSlides || [];
+  const slides = cacheSlides.concat(localSlides);
+
+  if (!slides.length) {
     $("#data-panel").style.display = "none";
     return null;
   }
-  const slides = cache.slides;
   $("#data-panel").style.display = "block";
-  $("#source-name").textContent = `${cache.filename || "(cached)"} · ${formatAge(cache.fetchedAt)} · ${slides.length} slides`;
+
+  const parts = [];
+  if (cache) parts.push(`${cache.filename || "(cached)"} · ${formatAge(cache.fetchedAt)} · ${cacheSlides.length} Reddit`);
+  if (localSlides.length) parts.push(`${localSlides.length} local`);
+  $("#source-name").textContent = parts.join(" + ");
 
   const counts = slides.reduce((m, s) => { m[s.kind] = (m[s.kind] || 0) + 1; return m; }, {});
   $("#stats").innerHTML =
@@ -593,10 +658,12 @@ function renderCacheInfo() {
 function reset() {
   localStorage.removeItem(LS.SAVED);
   delete window.__memoryCache;
+  clearLocalFiles();
   $("#errors").innerHTML = "";
   $("#progress-text").textContent = "";
   $("#stats").innerHTML = "";
   $("#csv-file").value = "";
+  if ($("#local-files")) $("#local-files").value = "";
   $("#data-panel").style.display = "none";
 }
 
@@ -814,6 +881,10 @@ fileInput.addEventListener("change", (e) => {
 dropzone.addEventListener("drop", (e) => {
   const f = e.dataTransfer?.files?.[0];
   if (f) loadFromFile(f);
+});
+
+$("#local-files").addEventListener("change", (e) => {
+  if (e.target.files?.length) addLocalFiles(e.target.files);
 });
 
 $("#reset-btn").addEventListener("click", reset);
