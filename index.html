@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (paste-token bypass, OAuth, CSV, zip import, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (CSV URL fallback when Reddit API is CORS-blocked, paste-token, OAuth, zip import, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -530,6 +530,40 @@ function parseCSV(text) {
   });
 }
 
+// Build a slide directly from a CSV row's url column — used as a fallback
+// when Reddit's anonymous api/info.json is CORS-blocked. Returns null for
+// rows we can't handle without a Reddit-side fetch (galleries, reddit permalinks).
+function slideFromCsvRowDirect(row) {
+  const id = ((row.id || "") + "").trim().replace(/^t3_/, "");
+  const url = ((row.url || "") + "").trim();
+  if (!id || !url) return null;
+  const post = {
+    title: row.title || "(untitled)",
+    permalink: `https://www.reddit.com/r/${row.subreddit || "unknown"}/comments/${id}/`,
+    subreddit: row.subreddit || "unknown",
+    id,
+    created_utc: 0,
+  };
+  if (/^https?:\/\/i\.redd\.it\//.test(url) || /\.(jpe?g|png|webp)($|\?)/i.test(url)) {
+    return { kind: "image", url, post };
+  }
+  const rg = extractRedgifsId(url);
+  if (rg) {
+    return { kind: "external", host: "redgifs", externalId: rg, fallbackUrl: "", post };
+  }
+  if (/^https?:\/\/v\.redd\.it\//.test(url)) {
+    return { kind: "video", url, post };
+  }
+  if (/imgur\.com.*\.gifv($|\?)/i.test(url)) {
+    return { kind: "video", url: url.replace(/\.gifv/i, ".mp4"), post };
+  }
+  if (/\.gif($|\?)/i.test(url)) {
+    return { kind: "image", url, post };
+  }
+  // Reddit permalink, comments, gallery: needs API fetch — skip in fallback mode.
+  return null;
+}
+
 function extractPostIdsFromCSV(rows) {
   const ids = [];
   for (const r of rows) {
@@ -821,21 +855,46 @@ async function loadFromCSV(file) {
   $("#start-btn").disabled = true;
   try {
     const text = await file.text();
-    const rows = parseCSV(text);
-    let ids = extractPostIdsFromCSV(rows);
-    if (!ids.length) {
-      showError("No post IDs found in that CSV. Make sure it's saved_posts.csv from your Reddit GDPR export.");
+    const allRows = parseCSV(text);
+    const allIds = extractPostIdsFromCSV(allRows);
+    if (!allIds.length) {
+      showError("No post IDs found in that CSV. Make sure it has an `id` or `permalink` column.");
       $("#progress-text").textContent = "";
       return;
     }
     const limit = parseInt($("#csv-limit").value, 10) || 0;
-    const totalFound = ids.length;
-    if (limit > 0 && ids.length > limit) ids = ids.slice(0, limit);
+    const totalFound = allIds.length;
+    const limitedRows = (limit > 0 && allRows.length > limit) ? allRows.slice(0, limit) : allRows;
+    const ids = extractPostIdsFromCSV(limitedRows);
+
     $("#progress-text").textContent = `Found ${totalFound} post IDs${limit > 0 && totalFound > limit ? ` (using newest ${ids.length})` : ""}. Fetching from Reddit…`;
-    const items = await fetchPostsByIds(ids, (n, total, note) => {
-      $("#progress-text").textContent = `Fetched ${n} / ${total}${note ? " — " + note : ""}…`;
-    });
-    let slides = expandToSlides(items);
+    let items = [];
+    let usedFallback = false;
+    try {
+      items = await fetchPostsByIds(ids, (n, total, note) => {
+        $("#progress-text").textContent = `Fetched ${n} / ${total}${note ? " — " + note : ""}…`;
+      });
+    } catch (apiErr) {
+      // CORS / network failure on Reddit's anonymous API. Fall back to building
+      // slides directly from the CSV's url column for rows that have one.
+      const hasUrlColumn = rows.length > 0 && "url" in rows[0];
+      if (!hasUrlColumn) throw apiErr;
+      console.warn("Reddit API failed; falling back to CSV url column:", apiErr.message);
+      usedFallback = true;
+      $("#progress-text").textContent = `Reddit API unreachable. Building slides from CSV URLs…`;
+    }
+
+    let slides;
+    if (usedFallback) {
+      slides = [];
+      for (const row of limitedRows) {
+        const s = slideFromCsvRowDirect(row);
+        if (s) slides.push(s);
+      }
+    } else {
+      slides = expandToSlides(items);
+    }
+
     const externalCount = slides.filter(s => s.kind === "external").length;
     if (externalCount > 0) {
       $("#progress-text").textContent = `Resolving ${externalCount} external videos (Redgifs)…`;
@@ -844,7 +903,9 @@ async function loadFromCSV(file) {
       });
     }
     saveCache({ fetchedAt: Date.now(), slides, filename: file.name });
-    $("#progress-text").textContent = `Done. ${items.length} posts → ${slides.length} media slides.`;
+    $("#progress-text").textContent = usedFallback
+      ? `Done (fallback mode). ${slides.length} of ${limitedRows.length} posts converted directly — galleries/permalinks were skipped because Reddit's API wasn't reachable.`
+      : `Done. ${items.length} posts → ${slides.length} media slides.`;
     renderCacheInfo();
   } catch (e) {
     showError(e.message);
