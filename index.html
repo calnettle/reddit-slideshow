@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-15 15:13 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-15 15:25 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -784,29 +784,53 @@ function classifyUrl(url) {
 }
 
 async function fetchRedditShareViaProxy(shareUrl) {
-  // Reddit's share links (/r/x/s/y) redirect server-side to the canonical permalink.
-  // Appending .json works through the redirect and returns the post listing directly.
+  // Reddit's share URLs (/r/x/s/y) redirect to the canonical post. Reddit strips
+  // ".json" during that redirect, so we can't just append .json. Two steps:
+  // 1. Fetch the share URL as HTML through the proxy (which follows the redirect).
+  // 2. Parse the canonical post ID out of the HTML, then fetch the post JSON.
   const clean = shareUrl.replace(/\?.*$/, "").replace(/\/$/, "");
-  const target = clean + ".json?raw_json=1";
-  let lastError = null;
+  let html = null;
+  const errors = [];
   for (const proxy of getCorsProxies()) {
-    const url = proxy + encodeURIComponent(target);
+    const url = proxy + encodeURIComponent(clean);
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), PROXY_TIMEOUT_MS);
     try {
       const res = await fetch(url, { signal: ctrl.signal, redirect: "follow" });
-      if (!res.ok) { lastError = `${proxy.split("?")[0]} → HTTP ${res.status}`; continue; }
-      const data = await res.json();
-      const post = data?.[0]?.data?.children?.[0]?.data;
-      if (post) return { post, proxy, error: null };
-      lastError = `${proxy.split("?")[0]} → unexpected JSON shape`;
+      if (!res.ok) { errors.push(`${proxy.split("?")[0]} → HTTP ${res.status}`); continue; }
+      html = await res.text();
+      if (html && html.length > 100) break;
+      errors.push(`${proxy.split("?")[0]} → empty response`);
     } catch (e) {
-      lastError = `${proxy.split("?")[0]} → ${e.name === "AbortError" ? "timeout" : e.message}`;
+      errors.push(`${proxy.split("?")[0]} → ${e.name === "AbortError" ? "timeout" : e.message}`);
     } finally {
       clearTimeout(timer);
     }
   }
-  return { post: null, proxy: null, error: lastError };
+  if (!html) return { post: null, proxy: null, error: errors.join("; ") };
+
+  // Extract canonical post ID. Try several markers in order of reliability.
+  let postId = null;
+  const canonical = html.match(/<link\s+rel=["']canonical["']\s+href=["']([^"']+)["']/i);
+  if (canonical) {
+    const m = canonical[1].match(/\/comments\/([a-z0-9]+)/i);
+    if (m) postId = m[1];
+  }
+  if (!postId) {
+    const og = html.match(/<meta\s+property=["']og:url["']\s+content=["']([^"']+)["']/i);
+    if (og) {
+      const m = og[1].match(/\/comments\/([a-z0-9]+)/i);
+      if (m) postId = m[1];
+    }
+  }
+  if (!postId) {
+    const m = html.match(/\/comments\/([a-z0-9]{4,})/i);
+    if (m) postId = m[1];
+  }
+  if (!postId) return { post: null, proxy: null, error: "couldn't extract post ID from share URL HTML" };
+
+  // Now fetch the actual post JSON.
+  return await fetchRedditPostViaProxy(postId);
 }
 
 async function addPostsByUrls(urls) {
@@ -1739,11 +1763,38 @@ dropzone.addEventListener("drop", (e) => {
 });
 
 $("#custom-proxy").value = localStorage.getItem(LS.CUSTOM_PROXY) || "";
-$("#custom-proxy-save").addEventListener("click", () => {
-  const v = ($("#custom-proxy").value || "").trim();
-  if (v) localStorage.setItem(LS.CUSTOM_PROXY, v);
-  else localStorage.removeItem(LS.CUSTOM_PROXY);
-  $("#progress-text").textContent = v ? `Custom proxy saved.` : "Custom proxy cleared — falling back to public proxies.";
+$("#custom-proxy-save").addEventListener("click", async () => {
+  let v = ($("#custom-proxy").value || "").trim();
+  if (!v) {
+    localStorage.removeItem(LS.CUSTOM_PROXY);
+    $("#progress-text").textContent = "Custom proxy cleared — falling back to public proxies.";
+    return;
+  }
+  // Auto-append /?url= if missing — common paste mistake.
+  if (!/[?&]url=$/.test(v) && !v.endsWith("=")) {
+    if (!v.endsWith("/")) v += "/";
+    v += "?url=";
+    $("#custom-proxy").value = v;
+  }
+  localStorage.setItem(LS.CUSTOM_PROXY, v);
+  // Live-test it with a known-good Reddit URL.
+  $("#progress-text").textContent = "Testing custom proxy…";
+  const testUrl = v + encodeURIComponent("https://www.reddit.com/r/test.json?raw_json=1&limit=1");
+  try {
+    const r = await fetch(testUrl);
+    if (!r.ok) {
+      $("#progress-text").textContent = `Custom proxy saved but test returned HTTP ${r.status}. Check the worker code/URL.`;
+      return;
+    }
+    const j = await r.json();
+    if (j?.data?.children) {
+      $("#progress-text").textContent = `Custom proxy saved and verified: ${v}`;
+    } else {
+      $("#progress-text").textContent = `Custom proxy saved but didn't return Reddit JSON. Got: ${JSON.stringify(j).slice(0, 100)}…`;
+    }
+  } catch (e) {
+    $("#progress-text").textContent = `Custom proxy saved but test failed: ${e.message}. Possibly CORS missing on the worker response.`;
+  }
 });
 
 $("#oauth-login-btn").addEventListener("click", startOAuthLogin);
