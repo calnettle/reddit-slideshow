@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-11 (CORS-proxy gallery expansion, HTML export import, CSV URL fallback, paste-token, OAuth, zip import, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Last updated: 2026-05-13 (paste URLs to append to cache, CORS-proxy gallery expansion, HTML export import, CSV URL fallback, paste-token, OAuth, zip import, lazy blob URLs, Redgifs API, sort/filter, cache export/import)</p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -161,6 +161,18 @@
     </div>
     <div id="stats" style="margin-top:12px"></div>
     <div id="progress-text" class="muted" style="margin-top:8px"></div>
+
+    <details style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+      <summary style="cursor:pointer"><strong>Add posts by URL</strong></summary>
+      <div style="margin-top:8px">
+        <p class="muted" style="font-size:12px;margin:0 0 6px">Paste one or more URLs (one per line). Supports Reddit permalinks, gallery links, i.redd.it images, v.redd.it videos, Redgifs, and Imgur .gifv. Reddit links route through the CORS proxy.</p>
+        <textarea id="add-links-input" rows="4" placeholder="https://www.reddit.com/r/foo/comments/abc/...&#10;https://i.redd.it/xyz.jpg&#10;https://www.redgifs.com/watch/something" style="width:100%;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:11px"></textarea>
+        <div class="row" style="margin-top:6px">
+          <button id="add-links-btn">Add to slideshow</button>
+          <span id="add-links-progress" class="muted" style="font-size:12px"></span>
+        </div>
+      </div>
+    </details>
   </div>
 
   <div id="errors"></div>
@@ -691,6 +703,91 @@ function gallerySlidesFromPost(redditPost, postInfo) {
     }
   }
   return slides;
+}
+
+function makeShortId(s) {
+  // Simple deterministic short ID for ad-hoc URLs (not a real Reddit ID).
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return "url-" + Math.abs(h).toString(36);
+}
+
+function classifyUrl(url) {
+  const gallery = url.match(/reddit\.com\/gallery\/([a-z0-9]+)/i);
+  if (gallery) return { kind: "reddit-gallery", id: gallery[1] };
+  const permalink = url.match(/reddit\.com\/r\/(\w+)\/comments\/([a-z0-9]+)/i);
+  if (permalink) return { kind: "reddit-permalink", id: permalink[2], subreddit: permalink[1] };
+  const shortPerma = url.match(/reddit\.com\/comments\/([a-z0-9]+)/i);
+  if (shortPerma) return { kind: "reddit-permalink", id: shortPerma[1], subreddit: "unknown" };
+  return { kind: "direct", url };
+}
+
+async function addPostsByUrls(urls) {
+  const cache = loadCache() || { fetchedAt: Date.now(), slides: [], filename: "manual additions" };
+  const existingUrls = new Set(cache.slides.map(s => s.url));
+  const existingPermalinks = new Set(cache.slides.map(s => s.post?.permalink));
+
+  const newSlides = [];
+  const galleries = []; // { id, post } for proxy fetch
+  const permalinks = []; // { id, sub, originalUrl }
+
+  for (const url of urls) {
+    if (existingUrls.has(url) || existingPermalinks.has(url)) continue;
+    const c = classifyUrl(url);
+    if (c.kind === "reddit-gallery") {
+      galleries.push({ id: c.id, url });
+    } else if (c.kind === "reddit-permalink") {
+      permalinks.push({ id: c.id, subreddit: c.subreddit, url });
+    } else {
+      // Direct media URL
+      const fakeId = makeShortId(url);
+      const slide = slideFromCsvRowDirect({ id: fakeId, url, subreddit: "added", title: url.split("/").pop() || url });
+      if (slide) {
+        slide.post.permalink = url;
+        newSlides.push(slide);
+      }
+    }
+  }
+
+  // Resolve Reddit permalinks + galleries via CORS proxy.
+  const toFetch = [...permalinks, ...galleries];
+  let done = 0;
+  for (const item of toFetch) {
+    $("#add-links-progress").textContent = `Fetching via proxy: ${done + 1} / ${toFetch.length}…`;
+    const post = await fetchRedditPostViaProxy(item.id);
+    if (post) {
+      const postInfo = {
+        title: post.title || "(untitled)",
+        permalink: "https://www.reddit.com" + (post.permalink || ""),
+        subreddit: post.subreddit || item.subreddit || "unknown",
+        id: post.id,
+        created_utc: post.created_utc || 0,
+      };
+      if (post.is_gallery) {
+        newSlides.push(...gallerySlidesFromPost(post, postInfo));
+      } else {
+        const expanded = expandToSlides([{ kind: "t3", data: post }]);
+        newSlides.push(...expanded);
+      }
+    }
+    done++;
+    if (done < toFetch.length) await new Promise(r => setTimeout(r, 700));
+  }
+
+  // Resolve Redgifs in the new batch.
+  const externalCount = newSlides.filter(s => s.kind === "external").length;
+  let finalNew = newSlides;
+  if (externalCount > 0) {
+    $("#add-links-progress").textContent = `Resolving ${externalCount} external videos…`;
+    finalNew = await enrichExternalSlides(newSlides);
+  }
+
+  // Dedupe against existing cache one more time by url.
+  const deduped = finalNew.filter(s => s.url && !existingUrls.has(s.url));
+  cache.slides = cache.slides.concat(deduped);
+  cache.fetchedAt = Date.now();
+  saveCache(cache);
+  return { added: deduped.length, requested: urls.length };
 }
 
 async function expandGalleriesViaProxy(galleryItems, onProgress) {
@@ -1541,6 +1638,28 @@ $("#raw-token-submit").addEventListener("click", injectRawToken);
 
 $("#local-files").addEventListener("change", (e) => {
   if (e.target.files?.length) loadLocalFilesOrZips(e.target.files);
+});
+
+$("#add-links-btn").addEventListener("click", async () => {
+  const raw = $("#add-links-input").value || "";
+  const urls = raw.split(/\s+/).map(s => s.trim()).filter(Boolean);
+  if (!urls.length) {
+    $("#add-links-progress").textContent = "Paste one or more URLs first.";
+    return;
+  }
+  $("#add-links-btn").disabled = true;
+  $("#add-links-progress").textContent = `Processing ${urls.length} URL(s)…`;
+  try {
+    const result = await addPostsByUrls(urls);
+    $("#add-links-progress").textContent = `Added ${result.added} new slide(s) from ${result.requested} URL(s). Click "Download cache (.json)" to save the updated file.`;
+    $("#add-links-input").value = "";
+    renderCacheInfo();
+  } catch (e) {
+    showError(e.message);
+    $("#add-links-progress").textContent = "";
+  } finally {
+    $("#add-links-btn").disabled = false;
+  }
 });
 
 $("#reset-btn").addEventListener("click", reset);
