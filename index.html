@@ -119,9 +119,17 @@
       <span class="muted" style="font-size:12px">Reddit's GDPR CSV is ordered newest-first, so the limit takes the most recently saved posts.</span>
     </div>
     <div class="row" style="margin-top:12px">
-      <label><input type="checkbox" id="expand-galleries"> Expand Reddit galleries via public CORS proxy</label>
-      <span class="muted" style="font-size:12px">Routes Reddit JSON through corsproxy.io. ~1s per gallery; can be slow with hundreds.</span>
+      <label><input type="checkbox" id="expand-galleries"> Expand Reddit galleries via CORS proxy</label>
+      <span class="muted" style="font-size:12px">Tries codetabs → corsproxy.io → allorigins → thingproxy. Falls back automatically.</span>
     </div>
+    <details style="margin-top:8px">
+      <summary class="muted" style="font-size:12px;cursor:pointer">Custom proxy URL (recommended — use your own Cloudflare Worker for reliability)</summary>
+      <div class="row" style="margin-top:6px">
+        <input id="custom-proxy" type="text" placeholder="https://your-worker.workers.dev/?url=" style="flex:1;min-width:280px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:12px">
+        <button id="custom-proxy-save">Save</button>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:6px">Public proxies are unreliable. A Cloudflare Worker is free (100K req/day) and ~5 min to set up. CF Worker code template is in the page source — search for <code>CF_WORKER_TEMPLATE</code>.</div>
+    </details>
 
     <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:16px">
       <strong>Or pick photos/videos from this device:</strong>
@@ -210,7 +218,40 @@ const LS = {
   USERNAME: "rss.username",
   OAUTH_STATE: "rss.oauth_state",
   PKCE_VERIFIER: "rss.pkce_verifier",
+  CUSTOM_PROXY: "rss.custom_proxy",
 };
+
+/* ============================================================
+ * CF_WORKER_TEMPLATE — deploy to workers.cloudflare.com for free
+ * reliable Reddit JSON access. Paste this as your worker code:
+ *
+ *   export default {
+ *     async fetch(req) {
+ *       const u = new URL(req.url);
+ *       const target = u.searchParams.get("url");
+ *       if (!target) return new Response("missing ?url=", { status: 400 });
+ *       try {
+ *         const r = await fetch(target, {
+ *           headers: { "User-Agent": "reddit-slideshow/1.0" }
+ *         });
+ *         const body = await r.arrayBuffer();
+ *         return new Response(body, {
+ *           status: r.status,
+ *           headers: {
+ *             "Content-Type": r.headers.get("Content-Type") || "application/json",
+ *             "Access-Control-Allow-Origin": "*",
+ *           },
+ *         });
+ *       } catch (e) {
+ *         return new Response(`fetch failed: ${e.message}`, { status: 502 });
+ *       }
+ *     },
+ *   };
+ *
+ * Deploy → get a URL like https://reddit-proxy.<you>.workers.dev/
+ * Paste `https://reddit-proxy.<you>.workers.dev/?url=` into the
+ * "Custom proxy URL" field in the upload panel.
+ * ============================================================ */
 
 const CONFIG = {
   // Paste the 14-char client ID from your "installed app" at reddit.com/prefs/apps.
@@ -672,18 +713,26 @@ async function loadFromFile(file) {
 
 const CORS_PROXY = "https://corsproxy.io/?url=";
 
-const CORS_PROXIES = [
-  "https://corsproxy.io/?url=",
-  "https://api.allorigins.win/raw?url=",
-];
+// Custom proxy is read from localStorage so it persists. Tried first.
+function getCorsProxies() {
+  const custom = localStorage.getItem(LS.CUSTOM_PROXY);
+  return [
+    ...(custom ? [custom] : []),
+    "https://api.codetabs.com/v1/proxy/?quest=",
+    "https://corsproxy.io/?url=",
+    "https://api.allorigins.win/raw?url=",
+    "https://thingproxy.freeboard.io/fetch/",
+  ];
+}
+const PROXY_TIMEOUT_MS = 25_000;
 
 async function fetchRedditPostViaProxy(postId) {
   const target = `https://www.reddit.com/comments/${postId}.json?raw_json=1`;
   let lastError = null;
-  for (const proxy of CORS_PROXIES) {
+  for (const proxy of getCorsProxies()) {
     const url = proxy + encodeURIComponent(target);
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 15_000);
+    const timer = setTimeout(() => ctrl.abort(), PROXY_TIMEOUT_MS);
     try {
       const res = await fetch(url, { signal: ctrl.signal });
       if (!res.ok) { lastError = `${proxy.split("?")[0]} → HTTP ${res.status}`; continue; }
@@ -740,10 +789,10 @@ async function fetchRedditShareViaProxy(shareUrl) {
   const clean = shareUrl.replace(/\?.*$/, "").replace(/\/$/, "");
   const target = clean + ".json?raw_json=1";
   let lastError = null;
-  for (const proxy of CORS_PROXIES) {
+  for (const proxy of getCorsProxies()) {
     const url = proxy + encodeURIComponent(target);
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 15_000);
+    const timer = setTimeout(() => ctrl.abort(), PROXY_TIMEOUT_MS);
     try {
       const res = await fetch(url, { signal: ctrl.signal, redirect: "follow" });
       if (!res.ok) { lastError = `${proxy.split("?")[0]} → HTTP ${res.status}`; continue; }
@@ -1687,6 +1736,14 @@ fileInput.addEventListener("change", (e) => {
 dropzone.addEventListener("drop", (e) => {
   const f = e.dataTransfer?.files?.[0];
   if (f) loadFromFile(f);
+});
+
+$("#custom-proxy").value = localStorage.getItem(LS.CUSTOM_PROXY) || "";
+$("#custom-proxy-save").addEventListener("click", () => {
+  const v = ($("#custom-proxy").value || "").trim();
+  if (v) localStorage.setItem(LS.CUSTOM_PROXY, v);
+  else localStorage.removeItem(LS.CUSTOM_PROXY);
+  $("#progress-text").textContent = v ? `Custom proxy saved.` : "Custom proxy cleared — falling back to public proxies.";
 });
 
 $("#oauth-login-btn").addEventListener("click", startOAuthLogin);
