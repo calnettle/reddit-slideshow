@@ -672,22 +672,32 @@ async function loadFromFile(file) {
 
 const CORS_PROXY = "https://corsproxy.io/?url=";
 
+const CORS_PROXIES = [
+  "https://corsproxy.io/?url=",
+  "https://api.allorigins.win/raw?url=",
+];
+
 async function fetchRedditPostViaProxy(postId) {
   const target = `https://www.reddit.com/comments/${postId}.json?raw_json=1`;
-  const url = CORS_PROXY + encodeURIComponent(target);
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 15_000);
-  try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    if (!res.ok) return null;
-    const data = await res.json();
-    // /comments/X.json returns [postListing, commentsListing]
-    return data?.[0]?.data?.children?.[0]?.data || null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
+  let lastError = null;
+  for (const proxy of CORS_PROXIES) {
+    const url = proxy + encodeURIComponent(target);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15_000);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) { lastError = `${proxy.split("?")[0]} → HTTP ${res.status}`; continue; }
+      const data = await res.json();
+      const post = data?.[0]?.data?.children?.[0]?.data;
+      if (post) return { post, proxy, error: null };
+      lastError = `${proxy.split("?")[0]} → unexpected JSON shape`;
+    } catch (e) {
+      lastError = `${proxy.split("?")[0]} → ${e.name === "AbortError" ? "timeout" : e.message}`;
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  return { post: null, proxy: null, error: lastError };
 }
 
 function gallerySlidesFromPost(redditPost, postInfo) {
@@ -752,9 +762,11 @@ async function addPostsByUrls(urls) {
   // Resolve Reddit permalinks + galleries via CORS proxy.
   const toFetch = [...permalinks, ...galleries];
   let done = 0;
+  const fetchErrors = [];
   for (const item of toFetch) {
     $("#add-links-progress").textContent = `Fetching via proxy: ${done + 1} / ${toFetch.length}…`;
-    const post = await fetchRedditPostViaProxy(item.id);
+    const result = await fetchRedditPostViaProxy(item.id);
+    const post = result.post;
     if (post) {
       const postInfo = {
         title: post.title || "(untitled)",
@@ -764,14 +776,23 @@ async function addPostsByUrls(urls) {
         created_utc: post.created_utc || 0,
       };
       if (post.is_gallery) {
-        newSlides.push(...gallerySlidesFromPost(post, postInfo));
+        const galSlides = gallerySlidesFromPost(post, postInfo);
+        newSlides.push(...galSlides);
+        if (!galSlides.length) fetchErrors.push(`${item.url}: gallery had no valid images`);
       } else {
         const expanded = expandToSlides([{ kind: "t3", data: post }]);
         newSlides.push(...expanded);
+        if (!expanded.length) fetchErrors.push(`${item.url}: post had no recognised media (might be a text post, removed, or external link)`);
       }
+    } else {
+      fetchErrors.push(`${item.url}: ${result.error || "fetch failed"}`);
     }
     done++;
     if (done < toFetch.length) await new Promise(r => setTimeout(r, 700));
+  }
+  if (fetchErrors.length) {
+    console.warn("addPostsByUrls fetch errors:", fetchErrors);
+    showError("Some URLs couldn't be fetched:\n" + fetchErrors.join("\n"));
   }
 
   // Resolve Redgifs in the new batch.
@@ -794,9 +815,9 @@ async function expandGalleriesViaProxy(galleryItems, onProgress) {
   const out = [];
   let done = 0;
   for (const item of galleryItems) {
-    const post = await fetchRedditPostViaProxy(item.id);
-    if (post) {
-      const slides = gallerySlidesFromPost(post, item.post);
+    const result = await fetchRedditPostViaProxy(item.id);
+    if (result.post) {
+      const slides = gallerySlidesFromPost(result.post, item.post);
       out.push(...slides);
     }
     done++;
