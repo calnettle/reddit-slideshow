@@ -727,9 +727,37 @@ function classifyUrl(url) {
   if (gallery) return { kind: "reddit-gallery", id: gallery[1] };
   const permalink = url.match(/reddit\.com\/r\/(\w+)\/comments\/([a-z0-9]+)/i);
   if (permalink) return { kind: "reddit-permalink", id: permalink[2], subreddit: permalink[1] };
+  const share = url.match(/reddit\.com\/r\/(\w+)\/s\/(\w+)/i);
+  if (share) return { kind: "reddit-share", shareUrl: url, subreddit: share[1] };
   const shortPerma = url.match(/reddit\.com\/comments\/([a-z0-9]+)/i);
   if (shortPerma) return { kind: "reddit-permalink", id: shortPerma[1], subreddit: "unknown" };
   return { kind: "direct", url };
+}
+
+async function fetchRedditShareViaProxy(shareUrl) {
+  // Reddit's share links (/r/x/s/y) redirect server-side to the canonical permalink.
+  // Appending .json works through the redirect and returns the post listing directly.
+  const clean = shareUrl.replace(/\?.*$/, "").replace(/\/$/, "");
+  const target = clean + ".json?raw_json=1";
+  let lastError = null;
+  for (const proxy of CORS_PROXIES) {
+    const url = proxy + encodeURIComponent(target);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15_000);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal, redirect: "follow" });
+      if (!res.ok) { lastError = `${proxy.split("?")[0]} → HTTP ${res.status}`; continue; }
+      const data = await res.json();
+      const post = data?.[0]?.data?.children?.[0]?.data;
+      if (post) return { post, proxy, error: null };
+      lastError = `${proxy.split("?")[0]} → unexpected JSON shape`;
+    } catch (e) {
+      lastError = `${proxy.split("?")[0]} → ${e.name === "AbortError" ? "timeout" : e.message}`;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { post: null, proxy: null, error: lastError };
 }
 
 async function addPostsByUrls(urls) {
@@ -740,6 +768,7 @@ async function addPostsByUrls(urls) {
   const newSlides = [];
   const galleries = []; // { id, post } for proxy fetch
   const permalinks = []; // { id, sub, originalUrl }
+  const shares = []; // { shareUrl, subreddit }
 
   for (const url of urls) {
     if (existingUrls.has(url) || existingPermalinks.has(url)) continue;
@@ -748,6 +777,8 @@ async function addPostsByUrls(urls) {
       galleries.push({ id: c.id, url });
     } else if (c.kind === "reddit-permalink") {
       permalinks.push({ id: c.id, subreddit: c.subreddit, url });
+    } else if (c.kind === "reddit-share") {
+      shares.push({ shareUrl: c.shareUrl, subreddit: c.subreddit, url });
     } else {
       // Direct media URL
       const fakeId = makeShortId(url);
@@ -759,13 +790,19 @@ async function addPostsByUrls(urls) {
     }
   }
 
-  // Resolve Reddit permalinks + galleries via CORS proxy.
-  const toFetch = [...permalinks, ...galleries];
+  // Resolve Reddit permalinks + galleries + shares via CORS proxy.
+  const toFetch = [
+    ...permalinks.map(p => ({ ...p, _type: "id" })),
+    ...galleries.map(g => ({ ...g, _type: "id" })),
+    ...shares.map(s => ({ ...s, _type: "share" })),
+  ];
   let done = 0;
   const fetchErrors = [];
   for (const item of toFetch) {
     $("#add-links-progress").textContent = `Fetching via proxy: ${done + 1} / ${toFetch.length}…`;
-    const result = await fetchRedditPostViaProxy(item.id);
+    const result = item._type === "share"
+      ? await fetchRedditShareViaProxy(item.shareUrl)
+      : await fetchRedditPostViaProxy(item.id);
     const post = result.post;
     if (post) {
       const postInfo = {
