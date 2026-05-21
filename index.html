@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-15 15:25 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-21 13:12 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -176,7 +176,8 @@
         <p class="muted" style="font-size:12px;margin:0 0 6px">Paste one or more URLs (one per line). Supports Reddit permalinks, gallery links, i.redd.it images, v.redd.it videos, Redgifs, and Imgur .gifv. Reddit links route through the CORS proxy.</p>
         <textarea id="add-links-input" rows="4" placeholder="https://www.reddit.com/r/foo/comments/abc/...&#10;https://i.redd.it/xyz.jpg&#10;https://www.redgifs.com/watch/something" style="width:100%;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:11px"></textarea>
         <div class="row" style="margin-top:6px">
-          <button id="add-links-btn">Add to slideshow</button>
+          <button id="paste-clipboard-btn">📋 Paste from clipboard</button>
+          <button id="add-links-btn" class="primary">Add to slideshow</button>
           <span id="add-links-progress" class="muted" style="font-size:12px"></span>
         </div>
       </div>
@@ -1804,6 +1805,30 @@ $("#raw-token-submit").addEventListener("click", injectRawToken);
 
 $("#local-files").addEventListener("change", (e) => {
   if (e.target.files?.length) loadLocalFilesOrZips(e.target.files);
+});
+
+$("#paste-clipboard-btn").addEventListener("click", async () => {
+  // Must run inside a user gesture (button click) on iOS. iOS prompts for permission the first time.
+  if (!navigator.clipboard || !navigator.clipboard.readText) {
+    $("#add-links-progress").textContent = "Clipboard API not available in this browser. Long-press the field and tap Paste.";
+    return;
+  }
+  try {
+    const text = (await navigator.clipboard.readText() || "").trim();
+    if (!text) {
+      $("#add-links-progress").textContent = "Clipboard was empty.";
+      return;
+    }
+    const ta = $("#add-links-input");
+    const existing = (ta.value || "").replace(/\s+$/, "");
+    ta.value = existing ? existing + "\n" + text : text;
+    // Auto-scroll to bottom so the new URL is visible.
+    ta.scrollTop = ta.scrollHeight;
+    const lines = ta.value.split(/\s+/).filter(Boolean).length;
+    $("#add-links-progress").textContent = `Pasted from clipboard. ${lines} URL(s) ready to add.`;
+  } catch (e) {
+    $("#add-links-progress").textContent = `Couldn't read clipboard: ${e.message}. iOS may have blocked the permission — try again or long-press the field to paste manually.`;
+  }
 });
 
 $("#add-links-btn").addEventListener("click", async () => {
