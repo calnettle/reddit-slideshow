@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-30 14:51 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-30 15:19 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -142,6 +142,67 @@
       </div>
       <div id="local-list" class="muted" style="font-size:12px;margin-top:6px"></div>
     </div>
+  </div>
+
+  <div id="browse-panel" class="panel">
+    <strong>Option C — Browse &amp; search subreddits (no login, no export):</strong>
+    <p class="muted" style="font-size:12px;margin:6px 0">Pulls image, gallery, GIF and video posts straight from Reddit into the slideshow — a pholder-style media browser. Uses the same proxy as Option B and <em>adds to</em> whatever's already loaded. Banned or private subs can't be browsed (Reddit has removed/locked that content); NSFW subs are hit-or-miss without a logged-in account.</p>
+
+    <div style="margin-top:10px">
+      <div class="muted" style="font-size:12px;margin-bottom:4px">Browse a subreddit</div>
+      <div class="row">
+        <input id="browse-sub" type="text" placeholder="EarthPorn   (or  EarthPorn+spaceporn)" style="flex:1;min-width:200px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+        <select id="browse-sort">
+          <option value="hot">Hot</option>
+          <option value="top">Top</option>
+          <option value="new">New</option>
+          <option value="rising">Rising</option>
+        </select>
+        <select id="browse-time" style="display:none">
+          <option value="day">Today</option>
+          <option value="week">This week</option>
+          <option value="month">This month</option>
+          <option value="year">This year</option>
+          <option value="all" selected>All time</option>
+        </select>
+        <button id="browse-btn" class="primary">Browse</button>
+      </div>
+    </div>
+
+    <div style="margin-top:12px">
+      <div class="muted" style="font-size:12px;margin-bottom:4px">Search Reddit for media</div>
+      <div class="row">
+        <input id="search-q" type="text" placeholder="search term (e.g. aurora borealis)" style="flex:1;min-width:170px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+        <input id="search-sub" type="text" placeholder="in sub (optional)" style="width:150px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+        <select id="search-sort">
+          <option value="relevance" selected>Relevance</option>
+          <option value="top">Top</option>
+          <option value="new">New</option>
+          <option value="hot">Hot</option>
+          <option value="comments">Most comments</option>
+        </select>
+        <select id="search-time">
+          <option value="all" selected>All time</option>
+          <option value="year">Past year</option>
+          <option value="month">Past month</option>
+          <option value="week">Past week</option>
+          <option value="day">Past day</option>
+        </select>
+        <button id="search-btn" class="primary">Search</button>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <label for="browse-limit">Max posts:</label>
+      <select id="browse-limit">
+        <option value="50">50</option>
+        <option value="100" selected>100</option>
+        <option value="250">250</option>
+        <option value="500">500</option>
+      </select>
+      <span class="muted" style="font-size:12px">Media posts are kept; text/self/link posts are skipped automatically.</span>
+    </div>
+    <div id="browse-progress" class="muted" style="font-size:12px;margin-top:8px"></div>
   </div>
 
   <div id="data-panel" class="panel" style="display:none">
@@ -936,6 +997,120 @@ async function expandGalleriesViaProxy(galleryItems, onProgress) {
     await new Promise(r => setTimeout(r, 700)); // throttle proxy
   }
   return out;
+}
+
+/* ============================================================
+ * Option C — Browse & search subreddits via public Reddit JSON.
+ * Reuses the same CORS-proxy list, expandToSlides() and Redgifs
+ * resolution as every other source. Results are appended to the
+ * current cache (deduped by url) so this stacks "as an extra".
+ * ============================================================ */
+async function fetchRedditJsonViaProxy(targetUrl) {
+  let lastError = null;
+  for (const proxy of getCorsProxies()) {
+    const url = proxy + encodeURIComponent(targetUrl);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PROXY_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) { lastError = `${proxy.split("?")[0]} → HTTP ${res.status}`; continue; }
+      const data = await res.json();
+      return { data, error: null };
+    } catch (e) {
+      lastError = `${proxy.split("?")[0]} → ${e.name === "AbortError" ? "timeout" : e.message}`;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { data: null, error: lastError };
+}
+
+// Reddit returns {error,reason} / {message,error} for banned, private or
+// missing subs. Turn those into a human explanation when a proxy passes
+// the body through with a 200.
+function listingProblem(data, subLabel) {
+  if (!data || typeof data !== "object") return null;
+  if (Array.isArray(data.data?.children)) return null; // normal listing
+  const reason = (data.reason || "").toString();
+  if (/banned/i.test(reason)) return `${subLabel} is banned — Reddit has removed its content, so it can't be browsed here.`;
+  if (/private|gold_only|quarantine/i.test(reason)) return `${subLabel} is private or quarantined — it needs a logged-in account with access.`;
+  if (data.error || data.reason) return `${subLabel}: Reddit returned "${reason || data.error}".`;
+  return null;
+}
+
+async function fetchRedditFeed(buildUrl, limit, subLabel, onProgress) {
+  const children = [];
+  const cap = limit > 0 ? limit : Infinity;
+  let after = null, page = 0;
+  while (children.length < cap) {
+    page++;
+    const perPage = cap === Infinity ? 100 : Math.min(100, cap - children.length);
+    const { data, error } = await fetchRedditJsonViaProxy(buildUrl(after, perPage));
+    if (!data) {
+      throw new Error(`Couldn't load ${subLabel}. It may be banned, private, misspelled, NSFW-gated, or Reddit is rate-limiting the public proxies — set a custom Cloudflare Worker proxy in Option B for reliability. (${error || "all proxies failed"})`);
+    }
+    const problem = listingProblem(data, subLabel);
+    if (problem) throw new Error(problem);
+    const kids = data?.data?.children || [];
+    children.push(...kids);
+    onProgress?.(children.length, page);
+    after = data?.data?.after;
+    if (!after || kids.length === 0) break;
+    await new Promise(r => setTimeout(r, 700)); // throttle proxy
+  }
+  return cap === Infinity ? children : children.slice(0, limit);
+}
+
+async function ingestChildren(children, sourceLabel, onProgress) {
+  let slides = expandToSlides(children);
+  const ext = slides.filter(s => s.kind === "external").length;
+  if (ext > 0) {
+    onProgress?.(`Resolving ${ext} external videos (Redgifs)…`);
+    slides = await enrichExternalSlides(slides);
+  }
+  const cache = loadCache() || { fetchedAt: Date.now(), slides: [], filename: sourceLabel };
+  const existing = new Set(cache.slides.map(s => s.url));
+  const fresh = slides.filter(s => s.url && !existing.has(s.url));
+  cache.slides = cache.slides.concat(fresh);
+  cache.fetchedAt = Date.now();
+  if (!cache.filename || cache.slides.length === fresh.length) cache.filename = sourceLabel;
+  else if (!cache.filename.split(" + ").includes(sourceLabel)) cache.filename = `${cache.filename} + ${sourceLabel}`;
+  saveCache(cache);
+  return { added: fresh.length, posts: children.length, mediaFound: slides.length };
+}
+
+async function browseSubreddit(subsRaw, sort, time, limit, onProgress) {
+  const subs = (subsRaw || "").trim().replace(/^\/?(r\/)?/i, "").replace(/\s+/g, "");
+  if (!subs) throw new Error("Enter a subreddit name first.");
+  const label = `r/${subs} · ${sort}`;
+  const buildUrl = (after, perPage) => {
+    const qs = new URLSearchParams({ limit: String(perPage), raw_json: "1" });
+    if (sort === "top") qs.set("t", time || "all");
+    if (after) qs.set("after", after);
+    return `https://www.reddit.com/r/${subs}/${sort}.json?` + qs.toString();
+  };
+  onProgress?.(`Fetching r/${subs}…`);
+  const children = await fetchRedditFeed(buildUrl, limit, `r/${subs}`, (n, p) => onProgress?.(`Fetched ${n} posts (page ${p})…`));
+  return ingestChildren(children, label, onProgress);
+}
+
+async function searchRedditMedia(query, subRaw, sort, time, limit, onProgress) {
+  const q = (query || "").trim();
+  if (!q) throw new Error("Enter a search term first.");
+  const sub = (subRaw || "").trim().replace(/^\/?(r\/)?/i, "").replace(/\s+/g, "");
+  const base = sub ? `https://www.reddit.com/r/${sub}/search.json` : "https://www.reddit.com/search.json";
+  const label = `search "${q}"${sub ? ` in r/${sub}` : ""}`;
+  const withTime = ["relevance", "top", "comments"].includes(sort);
+  const buildUrl = (after, perPage) => {
+    const qs = new URLSearchParams({ q, type: "link", sort: sort || "relevance", limit: String(perPage), raw_json: "1", include_over_18: "on" });
+    if (sub) qs.set("restrict_sr", "1");
+    if (withTime) qs.set("t", time || "all");
+    if (after) qs.set("after", after);
+    return base + "?" + qs.toString();
+  };
+  onProgress?.(`Searching Reddit for "${q}"…`);
+  const children = await fetchRedditFeed(buildUrl, limit, label, (n, p) => onProgress?.(`Found ${n} posts (page ${p})…`));
+  return ingestChildren(children, label, onProgress);
 }
 
 async function loadFromHTML(file) {
@@ -1852,6 +2027,46 @@ $("#add-links-btn").addEventListener("click", async () => {
     $("#add-links-btn").disabled = false;
   }
 });
+
+/* Option C — browse & search wiring */
+function syncBrowseTime() { $("#browse-time").style.display = $("#browse-sort").value === "top" ? "" : "none"; }
+function syncSearchTime() { $("#search-time").style.display = ["relevance", "top", "comments"].includes($("#search-sort").value) ? "" : "none"; }
+$("#browse-sort").addEventListener("change", syncBrowseTime);
+$("#search-sort").addEventListener("change", syncSearchTime);
+syncBrowseTime();
+syncSearchTime();
+
+async function runBrowseOrSearch(mode) {
+  const btn = mode === "browse" ? $("#browse-btn") : $("#search-btn");
+  const limit = parseInt($("#browse-limit").value, 10) || 100;
+  $("#errors").innerHTML = "";
+  $("#data-panel").style.display = "block";
+  $("#browse-btn").disabled = true;
+  $("#search-btn").disabled = true;
+  const setProg = (msg) => { $("#browse-progress").textContent = msg; };
+  try {
+    const result = mode === "browse"
+      ? await browseSubreddit($("#browse-sub").value, $("#browse-sort").value, $("#browse-time").value, limit, setProg)
+      : await searchRedditMedia($("#search-q").value, $("#search-sub").value, $("#search-sort").value, $("#search-time").value, limit, setProg);
+    if (result.added === 0 && result.mediaFound === 0) {
+      setProg(`Loaded ${result.posts} post(s) but none contained usable media (likely text/link posts). Try a different sub, sort, or search.`);
+    } else {
+      setProg(`Added ${result.added} new slide(s) from ${result.posts} post(s)${result.added < result.mediaFound ? ` (${result.mediaFound - result.added} were already loaded)` : ""}. Press "Start slideshow" below.`);
+    }
+    renderCacheInfo();
+  } catch (e) {
+    showError(e.message);
+    setProg("");
+  } finally {
+    $("#browse-btn").disabled = false;
+    $("#search-btn").disabled = false;
+  }
+}
+$("#browse-btn").addEventListener("click", () => runBrowseOrSearch("browse"));
+$("#search-btn").addEventListener("click", () => runBrowseOrSearch("search"));
+$("#browse-sub").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); runBrowseOrSearch("browse"); } });
+$("#search-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); runBrowseOrSearch("search"); } });
+$("#search-sub").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); runBrowseOrSearch("search"); } });
 
 $("#reset-btn").addEventListener("click", reset);
 $("#export-btn").addEventListener("click", exportCache);
