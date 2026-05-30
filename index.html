@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-30 15:19 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-30 16:08 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -146,48 +146,21 @@
 
   <div id="browse-panel" class="panel">
     <strong>Option C — Browse &amp; search subreddits (no login, no export):</strong>
-    <p class="muted" style="font-size:12px;margin:6px 0">Pulls image, gallery, GIF and video posts straight from Reddit into the slideshow — a pholder-style media browser. Uses the same proxy as Option B and <em>adds to</em> whatever's already loaded. Banned or private subs can't be browsed (Reddit has removed/locked that content); NSFW subs are hit-or-miss without a logged-in account.</p>
+    <p class="muted" style="font-size:12px;margin:6px 0">Pulls a subreddit's recent image, GIF and video posts — or keyword-search results — from the public <strong>PullPush</strong> Reddit archive (api.pullpush.io) straight into the slideshow. No login, no proxy, works on mobile. <em>Adds to</em> whatever's already loaded; newest first.</p>
 
     <div style="margin-top:10px">
-      <div class="muted" style="font-size:12px;margin-bottom:4px">Browse a subreddit</div>
+      <div class="muted" style="font-size:12px;margin-bottom:4px">Browse a subreddit's newest media</div>
       <div class="row">
-        <input id="browse-sub" type="text" placeholder="EarthPorn   (or  EarthPorn+spaceporn)" style="flex:1;min-width:200px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
-        <select id="browse-sort">
-          <option value="hot">Hot</option>
-          <option value="top">Top</option>
-          <option value="new">New</option>
-          <option value="rising">Rising</option>
-        </select>
-        <select id="browse-time" style="display:none">
-          <option value="day">Today</option>
-          <option value="week">This week</option>
-          <option value="month">This month</option>
-          <option value="year">This year</option>
-          <option value="all" selected>All time</option>
-        </select>
+        <input id="browse-sub" type="text" placeholder="EarthPorn" style="flex:1;min-width:200px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
         <button id="browse-btn" class="primary">Browse</button>
       </div>
     </div>
 
     <div style="margin-top:12px">
-      <div class="muted" style="font-size:12px;margin-bottom:4px">Search Reddit for media</div>
+      <div class="muted" style="font-size:12px;margin-bottom:4px">Search Reddit for media (newest matching)</div>
       <div class="row">
         <input id="search-q" type="text" placeholder="search term (e.g. aurora borealis)" style="flex:1;min-width:170px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
         <input id="search-sub" type="text" placeholder="in sub (optional)" style="width:150px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
-        <select id="search-sort">
-          <option value="relevance" selected>Relevance</option>
-          <option value="top">Top</option>
-          <option value="new">New</option>
-          <option value="hot">Hot</option>
-          <option value="comments">Most comments</option>
-        </select>
-        <select id="search-time">
-          <option value="all" selected>All time</option>
-          <option value="year">Past year</option>
-          <option value="month">Past month</option>
-          <option value="week">Past week</option>
-          <option value="day">Past day</option>
-        </select>
         <button id="search-btn" class="primary">Search</button>
       </div>
     </div>
@@ -200,7 +173,7 @@
         <option value="250">250</option>
         <option value="500">500</option>
       </select>
-      <span class="muted" style="font-size:12px">Media posts are kept; text/self/link posts are skipped automatically.</span>
+      <span class="muted" style="font-size:12px">Image/video posts are kept; text/link posts are skipped. Returns the most recent matching posts.</span>
     </div>
     <div id="browse-progress" class="muted" style="font-size:12px;margin-top:8px"></div>
   </div>
@@ -1000,65 +973,67 @@ async function expandGalleriesViaProxy(galleryItems, onProgress) {
 }
 
 /* ============================================================
- * Option C — Browse & search subreddits via public Reddit JSON.
- * Reuses the same CORS-proxy list, expandToSlides() and Redgifs
- * resolution as every other source. Results are appended to the
- * current cache (deduped by url) so this stacks "as an extra".
+ * Option C — Browse & search subreddits via the PullPush archive
+ * (api.pullpush.io). Reddit blocks anonymous .json now (403), so we
+ * read this public, CORS-open Reddit archive directly from the browser
+ * — no login, no proxy, no OAuth. Submissions are shaped as t3 objects
+ * and run through the same expandToSlides() / Redgifs / cache pipeline
+ * as every other source, appending (deduped by url) "as an extra".
  * ============================================================ */
-async function fetchRedditJsonViaProxy(targetUrl) {
-  let lastError = null;
-  for (const proxy of getCorsProxies()) {
-    const url = proxy + encodeURIComponent(targetUrl);
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), PROXY_TIMEOUT_MS);
-    try {
-      const res = await fetch(url, { signal: ctrl.signal });
-      if (!res.ok) { lastError = `${proxy.split("?")[0]} → HTTP ${res.status}`; continue; }
-      const data = await res.json();
-      return { data, error: null };
-    } catch (e) {
-      lastError = `${proxy.split("?")[0]} → ${e.name === "AbortError" ? "timeout" : e.message}`;
-    } finally {
-      clearTimeout(timer);
-    }
+const PULLPUSH_URL = "https://api.pullpush.io/reddit/search/submission/";
+const PULLPUSH_TIMEOUT_MS = 30_000;
+
+// Map a UI time window to a PullPush `after` epoch (null = all time).
+function pullpushAfter(time) {
+  const spans = { day: 86400, week: 604800, month: 2592000, year: 31536000 };
+  return spans[time] ? Math.floor(Date.now() / 1000) - spans[time] : null;
+}
+
+async function fetchPullPush(params) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), PULLPUSH_TIMEOUT_MS);
+  try {
+    const res = await fetch(PULLPUSH_URL + "?" + new URLSearchParams(params).toString(), {
+      headers: { "Accept": "application/json" }, signal: ctrl.signal,
+    });
+    if (res.status === 429) throw new Error("PullPush is rate-limiting requests — wait ~30s and try again.");
+    if (!res.ok) throw new Error(`PullPush returned HTTP ${res.status}.`);
+    const json = await res.json();
+    return Array.isArray(json.data) ? json.data : [];
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("PullPush timed out — it may be busy; try again.");
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return { data: null, error: lastError };
 }
 
-// Reddit returns {error,reason} / {message,error} for banned, private or
-// missing subs. Turn those into a human explanation when a proxy passes
-// the body through with a 200.
-function listingProblem(data, subLabel) {
-  if (!data || typeof data !== "object") return null;
-  if (Array.isArray(data.data?.children)) return null; // normal listing
-  const reason = (data.reason || "").toString();
-  if (/banned/i.test(reason)) return `${subLabel} is banned — Reddit has removed its content, so it can't be browsed here.`;
-  if (/private|gold_only|quarantine/i.test(reason)) return `${subLabel} is private or quarantined — it needs a logged-in account with access.`;
-  if (data.error || data.reason) return `${subLabel}: Reddit returned "${reason || data.error}".`;
-  return null;
-}
+// Returns raw PullPush submission objects. Only the "new" sort paginates
+// coherently (cursor = created_utc); score/comment sorts return one page.
+async function fetchPullPushFeed({ subreddit, q, sort, time }, limit, onProgress) {
+  const sortType = sort === "top" ? "score" : sort === "comments" ? "num_comments" : "created_utc";
+  const after = pullpushAfter(time);
+  const base = { sort_type: sortType, sort: "desc" };
+  if (subreddit) base.subreddit = subreddit;
+  if (q) base.q = q;
+  if (after) base.after = String(after);
 
-async function fetchRedditFeed(buildUrl, limit, subLabel, onProgress) {
-  const children = [];
-  const cap = limit > 0 ? limit : Infinity;
-  let after = null, page = 0;
-  while (children.length < cap) {
+  const cap = limit > 0 ? limit : 100;
+  const out = [];
+  let before = null, page = 0;
+  while (out.length < cap) {
     page++;
-    const perPage = cap === Infinity ? 100 : Math.min(100, cap - children.length);
-    const { data, error } = await fetchRedditJsonViaProxy(buildUrl(after, perPage));
-    if (!data) {
-      throw new Error(`Couldn't load ${subLabel}. It may be banned, private, misspelled, NSFW-gated, or Reddit is rate-limiting the public proxies — set a custom Cloudflare Worker proxy in Option B for reliability. (${error || "all proxies failed"})`);
-    }
-    const problem = listingProblem(data, subLabel);
-    if (problem) throw new Error(problem);
-    const kids = data?.data?.children || [];
-    children.push(...kids);
-    onProgress?.(children.length, page);
-    after = data?.data?.after;
-    if (!after || kids.length === 0) break;
-    await new Promise(r => setTimeout(r, 700)); // throttle proxy
+    const params = { ...base, size: String(Math.min(100, cap - out.length)) };
+    if (before) params.before = String(before);
+    const batch = await fetchPullPush(params);
+    out.push(...batch);
+    onProgress?.(out.length, page);
+    if (sort !== "new" || batch.length < 100) break; // only created_utc pages coherently
+    before = batch[batch.length - 1]?.created_utc;
+    if (!before) break;
+    await new Promise(r => setTimeout(r, 700)); // be gentle on the archive
   }
-  return cap === Infinity ? children : children.slice(0, limit);
+  return out.slice(0, cap);
 }
 
 async function ingestChildren(children, sourceLabel, onProgress) {
@@ -1080,37 +1055,25 @@ async function ingestChildren(children, sourceLabel, onProgress) {
 }
 
 async function browseSubreddit(subsRaw, sort, time, limit, onProgress) {
-  const subs = (subsRaw || "").trim().replace(/^\/?(r\/)?/i, "").replace(/\s+/g, "");
+  const subs = (subsRaw || "").trim().replace(/^\/?(r\/)?/i, "").replace(/[\s+].*$/, "");
   if (!subs) throw new Error("Enter a subreddit name first.");
-  const label = `r/${subs} · ${sort}`;
-  const buildUrl = (after, perPage) => {
-    const qs = new URLSearchParams({ limit: String(perPage), raw_json: "1" });
-    if (sort === "top") qs.set("t", time || "all");
-    if (after) qs.set("after", after);
-    return `https://www.reddit.com/r/${subs}/${sort}.json?` + qs.toString();
-  };
-  onProgress?.(`Fetching r/${subs}…`);
-  const children = await fetchRedditFeed(buildUrl, limit, `r/${subs}`, (n, p) => onProgress?.(`Fetched ${n} posts (page ${p})…`));
-  return ingestChildren(children, label, onProgress);
+  onProgress?.(`Searching the PullPush archive for r/${subs}…`);
+  const posts = await fetchPullPushFeed({ subreddit: subs, sort, time }, limit,
+    (n, p) => onProgress?.(`Fetched ${n} posts (page ${p})…`));
+  if (!posts.length) throw new Error(`No archived posts found for r/${subs} — check the spelling, or widen the time window. (Brand-new or very small subs may have little archive coverage.)`);
+  return ingestChildren(posts.map(s => ({ kind: "t3", data: s })), `r/${subs}`, onProgress);
 }
 
 async function searchRedditMedia(query, subRaw, sort, time, limit, onProgress) {
   const q = (query || "").trim();
   if (!q) throw new Error("Enter a search term first.");
-  const sub = (subRaw || "").trim().replace(/^\/?(r\/)?/i, "").replace(/\s+/g, "");
-  const base = sub ? `https://www.reddit.com/r/${sub}/search.json` : "https://www.reddit.com/search.json";
+  const sub = (subRaw || "").trim().replace(/^\/?(r\/)?/i, "").replace(/[\s+].*$/, "");
   const label = `search "${q}"${sub ? ` in r/${sub}` : ""}`;
-  const withTime = ["relevance", "top", "comments"].includes(sort);
-  const buildUrl = (after, perPage) => {
-    const qs = new URLSearchParams({ q, type: "link", sort: sort || "relevance", limit: String(perPage), raw_json: "1", include_over_18: "on" });
-    if (sub) qs.set("restrict_sr", "1");
-    if (withTime) qs.set("t", time || "all");
-    if (after) qs.set("after", after);
-    return base + "?" + qs.toString();
-  };
-  onProgress?.(`Searching Reddit for "${q}"…`);
-  const children = await fetchRedditFeed(buildUrl, limit, label, (n, p) => onProgress?.(`Found ${n} posts (page ${p})…`));
-  return ingestChildren(children, label, onProgress);
+  onProgress?.(`Searching the PullPush archive for "${q}"…`);
+  const posts = await fetchPullPushFeed({ subreddit: sub || undefined, q, sort, time }, limit,
+    (n, p) => onProgress?.(`Found ${n} posts (page ${p})…`));
+  if (!posts.length) throw new Error(`No archived posts matched "${q}"${sub ? ` in r/${sub}` : ""}. Try a broader term, drop the sub filter, or widen the time window.`);
+  return ingestChildren(posts.map(s => ({ kind: "t3", data: s })), label, onProgress);
 }
 
 async function loadFromHTML(file) {
@@ -2028,13 +1991,7 @@ $("#add-links-btn").addEventListener("click", async () => {
   }
 });
 
-/* Option C — browse & search wiring */
-function syncBrowseTime() { $("#browse-time").style.display = $("#browse-sort").value === "top" ? "" : "none"; }
-function syncSearchTime() { $("#search-time").style.display = ["relevance", "top", "comments"].includes($("#search-sort").value) ? "" : "none"; }
-$("#browse-sort").addEventListener("change", syncBrowseTime);
-$("#search-sort").addEventListener("change", syncSearchTime);
-syncBrowseTime();
-syncSearchTime();
+/* Option C — browse & search wiring (PullPush, newest-first). */
 
 async function runBrowseOrSearch(mode) {
   const btn = mode === "browse" ? $("#browse-btn") : $("#search-btn");
@@ -2046,8 +2003,8 @@ async function runBrowseOrSearch(mode) {
   const setProg = (msg) => { $("#browse-progress").textContent = msg; };
   try {
     const result = mode === "browse"
-      ? await browseSubreddit($("#browse-sub").value, $("#browse-sort").value, $("#browse-time").value, limit, setProg)
-      : await searchRedditMedia($("#search-q").value, $("#search-sub").value, $("#search-sort").value, $("#search-time").value, limit, setProg);
+      ? await browseSubreddit($("#browse-sub").value, "new", null, limit, setProg)
+      : await searchRedditMedia($("#search-q").value, $("#search-sub").value, "new", null, limit, setProg);
     if (result.added === 0 && result.mediaFound === 0) {
       setProg(`Loaded ${result.posts} post(s) but none contained usable media (likely text/link posts). Try a different sub, sort, or search.`);
     } else {
