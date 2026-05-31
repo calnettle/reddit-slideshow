@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-31 00:20 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-31 01:41 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -172,6 +172,9 @@
         <option value="100" selected>100</option>
         <option value="250">250</option>
         <option value="500">500</option>
+        <option value="1000">1000</option>
+        <option value="2500">2500</option>
+        <option value="5000">5000</option>
       </select>
       <label for="filter-time" style="margin-left:8px">Dates:</label>
       <select id="filter-time">
@@ -1779,10 +1782,11 @@ const Show = {
     this.clearTimers();
     this.idx = (i + this.order.length) % this.order.length;
 
-    // Skip slides whose media is known-dead (post deleted from Reddit / 404), forward.
+    // Skip slides whose media is known-dead (post deleted from Reddit / 404),
+    // in the current direction of travel so Prev steps back to a live post.
     let guard = 0;
     while (this.dead && this.dead.has(this.slides[this.order[this.idx]].url) && guard < this.order.length) {
-      this.idx = (this.idx + 1) % this.order.length;
+      this.idx = (this.idx + (this.dir || 1) + this.order.length) % this.order.length;
       guard++;
     }
     if (guard >= this.order.length) {
@@ -1805,7 +1809,7 @@ const Show = {
 
     if (slide.kind === "image") {
       const img = document.createElement("img");
-      const skip = () => { this.markDead(slide); this.show(this.idx + 1); };
+      const skip = () => { this.markDead(slide); this.show(this.idx + (this.dir || 1)); };
       img.onerror = skip;                                        // gone → skip on
       img.onload = () => { if (this.isDeadImage(img)) skip(); }; // 404 placeholder loads OK
       img.src = slide.url;
@@ -1813,7 +1817,7 @@ const Show = {
       wrap.appendChild(img);
     } else {
       const v = document.createElement("video");
-      v.onerror = () => { this.markDead(slide); this.show(this.idx + 1); };
+      v.onerror = () => { this.markDead(slide); this.show(this.idx + (this.dir || 1)); };
       v.src = slide.url;
       v.autoplay = true;
       v.muted = true;
@@ -1833,7 +1837,10 @@ const Show = {
 
     $("#post-title").textContent = `[r/${slide.post.subreddit}] ${slide.post.title}`;
     $("#post-link").href = slide.post.permalink;
-    $("#slide-counter").textContent = `${this.idx + 1} / ${this.order.length}`;
+    const isLive = (si) => !(this.dead && this.dead.has(this.slides[si].url));
+    const liveTotal = this.order.reduce((n, si) => n + (isLive(si) ? 1 : 0), 0);
+    const livePos = this.order.slice(0, this.idx + 1).reduce((n, si) => n + (isLive(si) ? 1 : 0), 0);
+    $("#slide-counter").textContent = `${livePos} / ${liveTotal}`;
 
     if (this.playing) this.scheduleAdvance(durationMs);
   },
@@ -1855,8 +1862,8 @@ const Show = {
     if (this.progressTimer) { clearInterval(this.progressTimer); this.progressTimer = null; }
   },
 
-  next() { this.show(this.idx + 1); },
-  prev() { this.show(this.idx - 1); },
+  next() { this.dir = 1; this.show(this.idx + 1); },
+  prev() { this.dir = -1; this.show(this.idx - 1); },
 
   togglePlay() {
     this.playing = !this.playing;
