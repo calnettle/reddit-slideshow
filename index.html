@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-31 01:53 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-31 04:29 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -208,6 +208,7 @@
         <option value="shuffle" selected>Shuffle (random)</option>
         <option value="oldest">Oldest saved → newest</option>
         <option value="newest">Newest saved → oldest</option>
+        <option value="score">Most upvotes first</option>
       </select>
       <label for="filter-mode" style="margin-left:12px">Filter:</label>
       <select id="filter-mode">
@@ -1505,6 +1506,7 @@ function expandToSlides(savedItems) {
       subreddit: p.subreddit,
       id: p.id,
       created_utc: p.created_utc || 0,
+      score: p.score || 0,
     };
 
     if (p.is_gallery && p.gallery_data && p.media_metadata) {
@@ -1752,6 +1754,9 @@ const Show = {
     if (mode === "newest") {
       return indices.sort((a, b) => (this.slides[b].post.created_utc || 0) - (this.slides[a].post.created_utc || 0));
     }
+    if (mode === "score") {
+      return indices.sort((a, b) => (this.slides[b].post.score || 0) - (this.slides[a].post.score || 0));
+    }
     return shuffle(indices);
   },
 
@@ -1872,7 +1877,9 @@ const Show = {
       }
     }
 
-    $("#post-title").textContent = `[r/${slide.post.subreddit}] ${slide.post.title}`;
+    const sc = slide.post.score || 0;
+    const up = sc >= 1000 ? (sc / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(sc);
+    $("#post-title").textContent = `[r/${slide.post.subreddit}${sc ? ` · ↑${up}` : ""}] ${slide.post.title}`;
     $("#post-link").href = slide.post.permalink;
     const isLive = (si) => !(this.dead && this.dead.has(this.slides[si].url));
     const liveTotal = this.order.reduce((n, si) => n + (isLive(si) ? 1 : 0), 0);
