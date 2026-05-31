@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-31 01:41 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-31 01:53 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -166,7 +166,12 @@
     </div>
 
     <div class="row" style="margin-top:12px">
-      <label for="browse-limit">Max posts:</label>
+      <label for="sort-by">Sort:</label>
+      <select id="sort-by">
+        <option value="new" selected>Newest</option>
+        <option value="top">Top (upvotes)</option>
+      </select>
+      <label for="browse-limit" style="margin-left:8px">Max posts:</label>
       <select id="browse-limit">
         <option value="50">50</option>
         <option value="100" selected>100</option>
@@ -185,7 +190,7 @@
         <option value="week">Newest week</option>
       </select>
     </div>
-    <div class="muted" style="font-size:12px;margin-top:8px">Image/video posts are kept; text/link posts skipped. Deleted/removed images are detected and skipped automatically during the slideshow. <strong>Note:</strong> the PullPush archive runs roughly a year behind live Reddit, so "newest" means newest <em>archived</em> (~mid-2025), and "Dates" is relative to that.</div>
+    <div class="muted" style="font-size:12px;margin-top:8px">Image/video posts are kept; text/link posts skipped. Deleted images are detected and skipped automatically. <strong>Top</strong> ranks by upvotes within the chosen Dates window (defaults to the newest year; up to ~1000 posts). <strong>Note:</strong> the PullPush archive runs ~a year behind live Reddit, so "newest" means newest <em>archived</em> (~mid-2025) and "Dates" is relative to that.</div>
     <div id="browse-progress" class="muted" style="font-size:12px;margin-top:8px"></div>
   </div>
 
@@ -1052,6 +1057,34 @@ async function fetchPullPushFeed({ subreddit, q, time }, limit, onProgress) {
   return out.slice(0, cap);
 }
 
+// "Top" = most-upvoted posts. A PullPush score-sort over a whole sub times
+// out, but is fast when bounded by a date window — so anchor to the newest
+// available post and rank by score within the window. score-sort can't
+// paginate, so for larger limits split the window into sub-periods and merge.
+async function fetchPullPushTop({ subreddit, q, time }, limit, onProgress) {
+  const base = {};
+  if (subreddit) base.subreddit = subreddit;
+  if (q) base.q = q;
+  const newest = await fetchPullPush({ ...base, sort_type: "created_utc", sort: "desc", size: "1" });
+  if (!newest.length) return [];
+  const anchor = newest[0].created_utc || 0;
+  const windowSec = pullpushWindow(time) || 31536000; // "All" → top of the newest year
+  const cap = Math.min(limit > 0 ? limit : 100, 1000);
+  const nWin = Math.max(1, Math.min(10, Math.ceil(cap / 100)));
+  const step = windowSec / nWin;
+  const seen = new Set(), all = [];
+  for (let i = 0; i < nWin; i++) {
+    const before = Math.floor(anchor - i * step) + 1;
+    const after = Math.floor(anchor - (i + 1) * step);
+    const batch = await fetchPullPush({ ...base, sort_type: "score", sort: "desc", after: String(after), before: String(before), size: "100" });
+    for (const p of batch) if (p && p.id && !seen.has(p.id)) { seen.add(p.id); all.push(p); }
+    onProgress?.(all.length, i + 1);
+    if (i < nWin - 1) await new Promise(r => setTimeout(r, 700));
+  }
+  all.sort((a, b) => (b.score || 0) - (a.score || 0));
+  return all.slice(0, cap);
+}
+
 async function ingestChildren(children, sourceLabel, onProgress) {
   let slides = expandToSlides(children);
   const ext = slides.filter(s => s.kind === "external").length;
@@ -1073,11 +1106,13 @@ async function ingestChildren(children, sourceLabel, onProgress) {
 async function browseSubreddit(subsRaw, sort, time, limit, onProgress) {
   const subs = (subsRaw || "").trim().replace(/^\/?(r\/)?/i, "").replace(/[\s+].*$/, "");
   if (!subs) throw new Error("Enter a subreddit name first.");
-  onProgress?.(`Searching the PullPush archive for r/${subs}…`);
-  const posts = await fetchPullPushFeed({ subreddit: subs, sort, time }, limit,
-    (n, p) => onProgress?.(`Fetched ${n} posts (page ${p})…`));
+  const top = sort === "top";
+  onProgress?.(top ? `Finding the top posts in r/${subs}…` : `Searching the PullPush archive for r/${subs}…`);
+  const posts = top
+    ? await fetchPullPushTop({ subreddit: subs, time }, limit, (n, w) => onProgress?.(`Ranked ${n} top posts (window ${w})…`))
+    : await fetchPullPushFeed({ subreddit: subs, time }, limit, (n, p) => onProgress?.(`Fetched ${n} posts (page ${p})…`));
   if (!posts.length) throw new Error(`No archived posts found for r/${subs} — check the spelling, or widen the time window. (Brand-new or very small subs may have little archive coverage.)`);
-  return ingestChildren(posts.map(s => ({ kind: "t3", data: s })), `r/${subs}`, onProgress);
+  return ingestChildren(posts.map(s => ({ kind: "t3", data: s })), `r/${subs}${top ? " · top" : ""}`, onProgress);
 }
 
 async function searchRedditMedia(query, subRaw, sort, time, limit, onProgress) {
@@ -1085,11 +1120,13 @@ async function searchRedditMedia(query, subRaw, sort, time, limit, onProgress) {
   if (!q) throw new Error("Enter a search term first.");
   const sub = (subRaw || "").trim().replace(/^\/?(r\/)?/i, "").replace(/[\s+].*$/, "");
   const label = `search "${q}"${sub ? ` in r/${sub}` : ""}`;
-  onProgress?.(`Searching the PullPush archive for "${q}"…`);
-  const posts = await fetchPullPushFeed({ subreddit: sub || undefined, q, sort, time }, limit,
-    (n, p) => onProgress?.(`Found ${n} posts (page ${p})…`));
+  const top = sort === "top";
+  onProgress?.(top ? `Finding the top "${q}" posts…` : `Searching the PullPush archive for "${q}"…`);
+  const posts = top
+    ? await fetchPullPushTop({ subreddit: sub || undefined, q, time }, limit, (n, w) => onProgress?.(`Ranked ${n} top posts (window ${w})…`))
+    : await fetchPullPushFeed({ subreddit: sub || undefined, q, time }, limit, (n, p) => onProgress?.(`Found ${n} posts (page ${p})…`));
   if (!posts.length) throw new Error(`No archived posts matched "${q}"${sub ? ` in r/${sub}` : ""}. Try a broader term, drop the sub filter, or widen the time window.`);
-  return ingestChildren(posts.map(s => ({ kind: "t3", data: s })), label, onProgress);
+  return ingestChildren(posts.map(s => ({ kind: "t3", data: s })), `${label}${top ? " · top" : ""}`, onProgress);
 }
 
 async function loadFromHTML(file) {
@@ -2052,9 +2089,10 @@ async function runBrowseOrSearch(mode) {
   $("#search-btn").disabled = true;
   const setProg = (msg) => { $("#browse-progress").textContent = msg; };
   try {
+    const sortBy = $("#sort-by").value;
     const result = mode === "browse"
-      ? await browseSubreddit($("#browse-sub").value, "new", $("#filter-time").value, limit, setProg)
-      : await searchRedditMedia($("#search-q").value, $("#search-sub").value, "new", $("#filter-time").value, limit, setProg);
+      ? await browseSubreddit($("#browse-sub").value, sortBy, $("#filter-time").value, limit, setProg)
+      : await searchRedditMedia($("#search-q").value, $("#search-sub").value, sortBy, $("#filter-time").value, limit, setProg);
     if (result.added === 0 && result.mediaFound === 0) {
       setProg(`Loaded ${result.posts} post(s) but none contained usable media (likely text/link posts). Try a different sub, sort, or search.`);
     } else {
