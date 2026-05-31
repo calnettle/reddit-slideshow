@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-30 16:08 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-31 00:20 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -173,8 +173,16 @@
         <option value="250">250</option>
         <option value="500">500</option>
       </select>
-      <span class="muted" style="font-size:12px">Image/video posts are kept; text/link posts are skipped. Returns the most recent matching posts.</span>
+      <label for="filter-time" style="margin-left:8px">Dates:</label>
+      <select id="filter-time">
+        <option value="all" selected>All available</option>
+        <option value="year">Newest year</option>
+        <option value="3months">Newest 3 months</option>
+        <option value="month">Newest month</option>
+        <option value="week">Newest week</option>
+      </select>
     </div>
+    <div class="muted" style="font-size:12px;margin-top:8px">Image/video posts are kept; text/link posts skipped. Deleted/removed images are detected and skipped automatically during the slideshow. <strong>Note:</strong> the PullPush archive runs roughly a year behind live Reddit, so "newest" means newest <em>archived</em> (~mid-2025), and "Dates" is relative to that.</div>
     <div id="browse-progress" class="muted" style="font-size:12px;margin-top:8px"></div>
   </div>
 
@@ -983,10 +991,10 @@ async function expandGalleriesViaProxy(galleryItems, onProgress) {
 const PULLPUSH_URL = "https://api.pullpush.io/reddit/search/submission/";
 const PULLPUSH_TIMEOUT_MS = 30_000;
 
-// Map a UI time window to a PullPush `after` epoch (null = all time).
-function pullpushAfter(time) {
-  const spans = { day: 86400, week: 604800, month: 2592000, year: 31536000 };
-  return spans[time] ? Math.floor(Date.now() / 1000) - spans[time] : null;
+// Map a UI time window to a span in seconds (0 = all available dates).
+function pullpushWindow(time) {
+  const spans = { week: 604800, month: 2592000, "3months": 7776000, year: 31536000 };
+  return spans[time] || 0;
 }
 
 async function fetchPullPush(params) {
@@ -1008,28 +1016,33 @@ async function fetchPullPush(params) {
   }
 }
 
-// Returns raw PullPush submission objects. Only the "new" sort paginates
-// coherently (cursor = created_utc); score/comment sorts return one page.
-async function fetchPullPushFeed({ subreddit, q, sort, time }, limit, onProgress) {
-  const sortType = sort === "top" ? "score" : sort === "comments" ? "num_comments" : "created_utc";
-  const after = pullpushAfter(time);
-  const base = { sort_type: sortType, sort: "desc" };
+// Returns raw PullPush submissions, newest-first. PullPush's archive lags
+// ~a year, so a "time window" is anchored to the newest *available* post
+// (cutoff = newest.created_utc - windowSeconds) and filtered client-side,
+// not against "now" (which would be empty).
+async function fetchPullPushFeed({ subreddit, q, time }, limit, onProgress) {
+  const windowSec = pullpushWindow(time);
+  const base = { sort_type: "created_utc", sort: "desc" };
   if (subreddit) base.subreddit = subreddit;
   if (q) base.q = q;
-  if (after) base.after = String(after);
 
   const cap = limit > 0 ? limit : 100;
   const out = [];
-  let before = null, page = 0;
+  let before = null, page = 0, cutoff = null;
   while (out.length < cap) {
     page++;
-    const params = { ...base, size: String(Math.min(100, cap - out.length)) };
+    const params = { ...base, size: "100" };
     if (before) params.before = String(before);
     const batch = await fetchPullPush(params);
-    out.push(...batch);
+    if (!batch.length) break;
+    if (windowSec && cutoff === null) cutoff = (batch[0].created_utc || 0) - windowSec;
+    const kept = cutoff !== null ? batch.filter(p => (p.created_utc || 0) >= cutoff) : batch;
+    out.push(...kept);
     onProgress?.(out.length, page);
-    if (sort !== "new" || batch.length < 100) break; // only created_utc pages coherently
-    before = batch[batch.length - 1]?.created_utc;
+    const lastRaw = batch[batch.length - 1]?.created_utc || 0;
+    if (batch.length < 100) break;                  // archive exhausted for this query
+    if (cutoff !== null && lastRaw < cutoff) break; // crossed the window edge
+    before = lastRaw;
     if (!before) break;
     await new Promise(r => setTimeout(r, 700)); // be gentle on the archive
   }
@@ -1722,6 +1735,18 @@ const Show = {
     }));
   },
 
+  markDead(slide) {
+    if (!this.dead) this.dead = new Set();
+    if (slide && slide.url) this.dead.add(slide.url);
+  },
+
+  // Deleted i.redd.it (130x60) / imgur (161x81) images return a tiny "image
+  // removed" placeholder with a normal onload, so catch deleted posts by size.
+  isDeadImage(img) {
+    const w = img.naturalWidth, h = img.naturalHeight;
+    return w > 0 && w <= 170 && h <= 90;
+  },
+
   preload(slide) {
     if (!slide) return;
     materializeSlideUrl(slide);
@@ -1730,6 +1755,8 @@ const Show = {
     let el;
     if (slide.kind === "image") {
       el = new Image();
+      el.onerror = () => this.markDead(slide);
+      el.onload = () => { if (this.isDeadImage(el)) this.markDead(slide); };
       el.src = slide.url;
     } else {
       el = document.createElement("video");
@@ -1751,6 +1778,18 @@ const Show = {
   show(i) {
     this.clearTimers();
     this.idx = (i + this.order.length) % this.order.length;
+
+    // Skip slides whose media is known-dead (post deleted from Reddit / 404), forward.
+    let guard = 0;
+    while (this.dead && this.dead.has(this.slides[this.order[this.idx]].url) && guard < this.order.length) {
+      this.idx = (this.idx + 1) % this.order.length;
+      guard++;
+    }
+    if (guard >= this.order.length) {
+      $("#media-wrap").innerHTML = '<div style="color:#fff;padding:24px;text-align:center;max-width:480px;margin:auto">All loaded posts have been deleted from Reddit and are no longer available. Exit and load a different subreddit.</div>';
+      $("#slide-counter").textContent = "";
+      return;
+    }
     const slide = this.slides[this.order[this.idx]];
     materializeSlideUrl(slide);
 
@@ -1766,11 +1805,15 @@ const Show = {
 
     if (slide.kind === "image") {
       const img = document.createElement("img");
+      const skip = () => { this.markDead(slide); this.show(this.idx + 1); };
+      img.onerror = skip;                                        // gone → skip on
+      img.onload = () => { if (this.isDeadImage(img)) skip(); }; // 404 placeholder loads OK
       img.src = slide.url;
       img.alt = slide.post.title;
       wrap.appendChild(img);
     } else {
       const v = document.createElement("video");
+      v.onerror = () => { this.markDead(slide); this.show(this.idx + 1); };
       v.src = slide.url;
       v.autoplay = true;
       v.muted = true;
@@ -2003,8 +2046,8 @@ async function runBrowseOrSearch(mode) {
   const setProg = (msg) => { $("#browse-progress").textContent = msg; };
   try {
     const result = mode === "browse"
-      ? await browseSubreddit($("#browse-sub").value, "new", null, limit, setProg)
-      : await searchRedditMedia($("#search-q").value, $("#search-sub").value, "new", null, limit, setProg);
+      ? await browseSubreddit($("#browse-sub").value, "new", $("#filter-time").value, limit, setProg)
+      : await searchRedditMedia($("#search-q").value, $("#search-sub").value, "new", $("#filter-time").value, limit, setProg);
     if (result.added === 0 && result.mediaFound === 0) {
       setProg(`Loaded ${result.posts} post(s) but none contained usable media (likely text/link posts). Try a different sub, sort, or search.`);
     } else {
