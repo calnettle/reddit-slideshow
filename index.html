@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-05-31 05:01 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-01 03:03 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -190,7 +190,7 @@
         <option value="week">Newest week</option>
       </select>
     </div>
-    <div class="muted" style="font-size:12px;margin-top:8px">Image/video posts are kept; text/link posts skipped. Deleted images are detected and skipped automatically. <strong>Top</strong> ranks by upvotes within the chosen Dates window (defaults to the newest year; up to ~1000 posts). <strong>Note:</strong> the PullPush archive runs ~a year behind live Reddit, so "newest" means newest <em>archived</em> (~mid-2025) and "Dates" is relative to that.</div>
+    <div class="muted" style="font-size:12px;margin-top:8px">Image/video posts are kept; text/link posts skipped. Deleted images are detected and skipped automatically. <strong>Top</strong> ranks by upvotes within the chosen Dates window (defaults to the newest year). Big Top counts (1000+) take 1–2 min and are limited by archive coverage, so many subs return fewer than you ask for. <strong>Note:</strong> the PullPush archive runs ~a year behind live Reddit, so "newest" means newest <em>archived</em> (~mid-2025) and "Dates" is relative to that.</div>
     <div id="browse-progress" class="muted" style="font-size:12px;margin-top:8px"></div>
   </div>
 
@@ -1070,8 +1070,8 @@ async function fetchPullPushTop({ subreddit, q, time }, limit, onProgress) {
   if (!newest.length) return [];
   const anchor = newest[0].created_utc || 0;
   const windowSec = pullpushWindow(time) || 31536000; // "All" → top of the newest year
-  const cap = Math.min(limit > 0 ? limit : 100, 1000);
-  const nWin = Math.max(1, Math.min(10, Math.ceil(cap / 100)));
+  const cap = Math.min(limit > 0 ? limit : 100, 5000);
+  const nWin = Math.max(1, Math.min(50, Math.ceil(cap / 100)));
   const step = windowSec / nWin;
   const ranges = [];
   for (let i = 0; i < nWin; i++) {
