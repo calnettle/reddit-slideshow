@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-01 04:35 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-01 04:51 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -180,6 +180,7 @@
         <option value="1000">1000</option>
         <option value="2500">2500</option>
         <option value="5000">5000</option>
+        <option value="0">All (scan everything)</option>
       </select>
       <label for="filter-time" style="margin-left:8px">Dates:</label>
       <select id="filter-time">
@@ -230,6 +231,7 @@
         <option value="1000">1000</option>
         <option value="2500">2500</option>
         <option value="5000">5000</option>
+        <option value="0">All (scan everything)</option>
       </select>
       <label for="arctic-time" style="margin-left:8px">Dates:</label>
       <select id="arctic-time">
@@ -1085,10 +1087,11 @@ async function fetchPullPushFeed({ subreddit, q, time }, limit, onProgress) {
   if (subreddit) base.subreddit = subreddit;
   if (q) base.q = q;
 
-  const cap = limit > 0 ? limit : 100;
+  const cap = limit > 0 ? limit : 50000; // 0 = "All" (high backstop; Stop or a Dates window bounds it)
   const out = [];
   let before = null, page = 0, cutoff = null;
   while (out.length < cap) {
+    if (window.__stopFetch) break;
     page++;
     const params = { ...base, size: "100" };
     if (before) params.before = String(before);
@@ -1119,7 +1122,7 @@ async function fetchPullPushTop({ subreddit, q, time }, limit, onProgress) {
   const newest = await fetchPullPush({ ...base, sort_type: "created_utc", sort: "desc", size: "1" });
   if (!newest.length) return [];
   const anchor = newest[0].created_utc || 0;
-  const cap = Math.min(limit > 0 ? limit : 100, 5000);
+  const cap = limit > 0 ? Math.min(limit, 5000) : 50000; // 0 = "All" → uncap past 5000
   let windowSec = pullpushWindow(time), nWin;
   if (!windowSec) {
     // "All available" → rank across the sub's ENTIRE history (oldest post → now),
@@ -1144,6 +1147,7 @@ async function fetchPullPushTop({ subreddit, q, time }, limit, onProgress) {
   let cursor = 0, done = 0, failed = 0;
   async function worker() {
     while (cursor < ranges.length) {
+      if (window.__stopFetch) break;
       const { after, before } = ranges[cursor++];
       try {
         const batch = await fetchPullPush({ ...base, sort_type: "score", sort: "desc", after: String(after), before: String(before), size: "100" }, 22000);
@@ -1253,10 +1257,11 @@ async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
   if (subreddit) base.subreddit = subreddit;
   if (title) base.title = title;
   if (after) base.after = String(after);
-  const cap = limit > 0 ? limit : 100;
+  const cap = limit > 0 ? limit : 50000; // 0 = "All"
   const out = [];
   let before = null, page = 0;
   while (out.length < cap) {
+    if (window.__stopFetch) break;
     page++;
     const params = { ...base };
     if (before) params.before = String(before);
@@ -1275,8 +1280,8 @@ async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
 // "Top" = fetch the window's posts (capped) and rank by score client-side,
 // since Arctic Shift has no server-side score sort.
 async function arcticTop({ subreddit, title, after }, limit, onProgress) {
-  const want = limit > 0 ? limit : 100;
-  const poolCap = Math.min(5000, Math.max(want * 2, 1000));
+  const want = limit > 0 ? limit : 50000; // 0 = "All"
+  const poolCap = limit > 0 ? Math.min(5000, Math.max(want * 2, 1000)) : 50000;
   const pool = await arcticFeed({ subreddit, title, after }, poolCap, onProgress);
   pool.sort((a, b) => (b.score || 0) - (a.score || 0));
   return pool.slice(0, Math.min(want, pool.length));
@@ -2268,31 +2273,44 @@ $("#add-links-btn").addEventListener("click", async () => {
 
 /* Option C — browse & search wiring (PullPush, newest-first). */
 
+/* Shared fetch-button state: the active button becomes "Stop" (re-clicking it
+   cancels via the __fetchBusy guard); the other fetch buttons disable. */
+const FETCH_BTNS = { "#browse-btn": "Browse", "#search-btn": "Search", "#arctic-browse-btn": "Browse", "#arctic-search-btn": "Search" };
+function setFetchButtons(activeSel) {
+  for (const s in FETCH_BTNS) { const el = $(s); if (!el) continue; if (s === activeSel) { el.textContent = "■ Stop"; el.disabled = false; } else el.disabled = true; }
+}
+function clearFetchButtons() {
+  window.__fetchBusy = false; window.__stopFetch = false;
+  for (const s in FETCH_BTNS) { const el = $(s); if (el) { el.textContent = FETCH_BTNS[s]; el.disabled = false; } }
+}
+
 async function runBrowseOrSearch(mode) {
-  const btn = mode === "browse" ? $("#browse-btn") : $("#search-btn");
-  const limit = parseInt($("#browse-limit").value, 10) || 100;
+  if (window.__fetchBusy) { window.__stopFetch = true; return; } // active "Stop" button clicked
+  window.__fetchBusy = true; window.__stopFetch = false;
+  const activeSel = mode === "browse" ? "#browse-btn" : "#search-btn";
+  const v = $("#browse-limit").value;
+  const limit = v === "0" ? 0 : (parseInt(v, 10) || 100);
   $("#errors").innerHTML = "";
   $("#data-panel").style.display = "block";
-  $("#browse-btn").disabled = true;
-  $("#search-btn").disabled = true;
+  setFetchButtons(activeSel);
   const setProg = (msg) => { $("#browse-progress").textContent = msg; };
   try {
     const sortBy = $("#sort-by").value;
     const result = mode === "browse"
       ? await browseSubreddit($("#browse-sub").value, sortBy, $("#filter-time").value, limit, setProg)
       : await searchRedditMedia($("#search-q").value, $("#search-sub").value, sortBy, $("#filter-time").value, limit, setProg);
+    const stopped = window.__stopFetch ? " (stopped)" : "";
     if (result.added === 0 && result.mediaFound === 0) {
       setProg(`Loaded ${result.posts} post(s) but none contained usable media (likely text/link posts). Try a different sub, sort, or search.`);
     } else {
-      setProg(`Added ${result.added} new slide(s) from ${result.posts} post(s)${result.added < result.mediaFound ? ` (${result.mediaFound - result.added} were already loaded)` : ""}. Press "Start slideshow" below.`);
+      setProg(`Added ${result.added} new slide(s) from ${result.posts} post(s)${stopped}${result.added < result.mediaFound ? ` (${result.mediaFound - result.added} were already loaded)` : ""}. Press "Start slideshow" below.`);
     }
     renderCacheInfo();
   } catch (e) {
     showError(e.message);
     setProg("");
   } finally {
-    $("#browse-btn").disabled = false;
-    $("#search-btn").disabled = false;
+    clearFetchButtons();
   }
 }
 $("#browse-btn").addEventListener("click", () => runBrowseOrSearch("browse"));
@@ -2303,30 +2321,33 @@ $("#search-sub").addEventListener("keydown", (e) => { if (e.key === "Enter") { e
 
 /* Option D — Arctic Shift wiring */
 async function runArctic(mode) {
-  const limit = parseInt($("#arctic-limit").value, 10) || 100;
+  if (window.__fetchBusy) { window.__stopFetch = true; return; }
+  window.__fetchBusy = true; window.__stopFetch = false;
+  const activeSel = mode === "browse" ? "#arctic-browse-btn" : "#arctic-search-btn";
+  const v = $("#arctic-limit").value;
+  const limit = v === "0" ? 0 : (parseInt(v, 10) || 100);
   const sort = $("#arctic-sort").value;
   const time = $("#arctic-time").value;
   $("#errors").innerHTML = "";
   $("#data-panel").style.display = "block";
-  $("#arctic-browse-btn").disabled = true;
-  $("#arctic-search-btn").disabled = true;
+  setFetchButtons(activeSel);
   const setProg = (msg) => { $("#arctic-progress").textContent = msg; };
   try {
     const result = mode === "browse"
       ? await arcticBrowse($("#arctic-sub").value, sort, time, limit, setProg)
       : await arcticSearch($("#arctic-q").value, $("#arctic-sub2").value, sort, time, limit, setProg);
+    const stopped = window.__stopFetch ? " (stopped)" : "";
     if (result.added === 0 && result.mediaFound === 0) {
       setProg(`Loaded ${result.posts} post(s) but none had usable media (likely text/link posts). Try a different sub or search.`);
     } else {
-      setProg(`Added ${result.added} new slide(s) from ${result.posts} post(s)${result.added < result.mediaFound ? ` (${result.mediaFound - result.added} already loaded)` : ""}. Press "Start slideshow" below.`);
+      setProg(`Added ${result.added} new slide(s) from ${result.posts} post(s)${stopped}${result.added < result.mediaFound ? ` (${result.mediaFound - result.added} already loaded)` : ""}. Press "Start slideshow" below.`);
     }
     renderCacheInfo();
   } catch (e) {
     showError(e.message);
     setProg("");
   } finally {
-    $("#arctic-browse-btn").disabled = false;
-    $("#arctic-search-btn").disabled = false;
+    clearFetchButtons();
   }
 }
 $("#arctic-browse-btn").addEventListener("click", () => runArctic("browse"));
