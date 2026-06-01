@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-01 03:19 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-01 03:37 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -190,7 +190,7 @@
         <option value="week">Newest week</option>
       </select>
     </div>
-    <div class="muted" style="font-size:12px;margin-top:8px">Image/video posts are kept; text/link posts skipped. Deleted images are detected and skipped automatically. <strong>Top</strong> ranks by upvotes within the chosen Dates window (defaults to the newest year). Big Top counts (1000+) take 1–2 min and are limited by archive coverage, so many subs return fewer than you ask for. <strong>Note:</strong> the PullPush archive runs ~a year behind live Reddit, so "newest" means newest <em>archived</em> (~mid-2025) and "Dates" is relative to that.</div>
+    <div class="muted" style="font-size:12px;margin-top:8px">Image/video posts are kept; text/link posts skipped. Deleted images are detected and skipped automatically. <strong>Top</strong> ranks by upvotes: with Dates = <strong>All available</strong> it scans the sub's <em>entire</em> history for the true all-time best (slower — ~1–3 min); a narrower Dates window ranks just that period. Archive coverage is patchy, so big counts may return fewer. <strong>Note:</strong> PullPush is frozen at ~mid-2025 (no posts from the last year) — for <em>current</em> content use Option D.</div>
     <div id="browse-progress" class="muted" style="font-size:12px;margin-top:8px"></div>
   </div>
 
@@ -240,7 +240,7 @@
         <option value="day">Past day</option>
       </select>
     </div>
-    <div class="muted" style="font-size:12px;margin-top:8px">Current data (up to today), so "Dates" is relative to now. "Top" ranks a fetched window by upvotes — best with a Dates window (e.g. Past month). Large pulls page 100 at a time, so 1000+ takes a bit.</div>
+    <div class="muted" style="font-size:12px;margin-top:8px">Current data (up to today), so "Dates" is relative to now. <strong>Top here = top of the most recent posts</strong> (Arctic Shift sorts by date, not score), so on a busy sub it only covers recent months. For the true <strong>all-time</strong> top of a whole sub, use <strong>Option C</strong> with Dates = All available. Large pulls page 100 at a time, so 1000+ takes a bit.</div>
     <div id="arctic-progress" class="muted" style="font-size:12px;margin-top:8px"></div>
   </div>
 
@@ -1119,9 +1119,19 @@ async function fetchPullPushTop({ subreddit, q, time }, limit, onProgress) {
   const newest = await fetchPullPush({ ...base, sort_type: "created_utc", sort: "desc", size: "1" });
   if (!newest.length) return [];
   const anchor = newest[0].created_utc || 0;
-  const windowSec = pullpushWindow(time) || 31536000; // "All" → top of the newest year
   const cap = Math.min(limit > 0 ? limit : 100, 5000);
-  const nWin = Math.max(1, Math.min(50, Math.ceil(cap / 100)));
+  let windowSec = pullpushWindow(time), nWin;
+  if (!windowSec) {
+    // "All available" → rank across the sub's ENTIRE history (oldest post → now),
+    // not just the last year, so this is a true all-time top.
+    onProgress?.(0, 0);
+    const oldest = await fetchPullPush({ ...base, sort_type: "created_utc", sort: "asc", size: "1" });
+    const start = oldest.length ? (oldest[0].created_utc || 0) : anchor - 31536000;
+    windowSec = Math.max(31536000, anchor - start);
+    nWin = Math.min(80, Math.max(Math.ceil(cap / 100), Math.ceil(windowSec / (90 * 86400)))); // ~90-day windows
+  } else {
+    nWin = Math.max(1, Math.min(50, Math.ceil(cap / 100)));
+  }
   const step = windowSec / nWin;
   const ranges = [];
   for (let i = 0; i < nWin; i++) {
