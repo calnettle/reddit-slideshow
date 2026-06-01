@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-01 03:37 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-01 04:35 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -1840,20 +1840,22 @@ async function enrichExternalSlides(slides, onProgress) {
 function saveCache(cache) {
   try {
     localStorage.setItem(LS.SAVED, JSON.stringify(cache));
+    delete window.__memoryCache; // fits in storage; localStorage is authoritative
   } catch (e) {
-    // Quota — try trimming slides progressively until it fits.
+    // Too big for browser storage. Keep the FULL set in memory so the entire
+    // slideshow plays this session, and persist as many as fit for reloads.
+    window.__memoryCache = cache;
     const original = cache.slides.length;
     let slides = cache.slides.slice();
     while (slides.length > 100) {
       slides = slides.slice(0, Math.floor(slides.length * 0.8));
       try {
         localStorage.setItem(LS.SAVED, JSON.stringify({ ...cache, slides, trimmed: original }));
-        showError(`localStorage quota hit; cached the most recent ${slides.length} of ${original} slides.`);
+        showError(`All ${original} slides are loaded and will play now. Your browser can only keep ${slides.length} of them after a reload — tap "Download cache (.json)" to save all of them.`);
         return;
       } catch (_) { /* keep trimming */ }
     }
-    showError("Could not save to localStorage (quota too small even after trimming). Slideshow will run from memory only.");
-    window.__memoryCache = cache;
+    showError(`All ${original} slides are loaded and will play now, but there are too many to save for a reload — tap "Download cache (.json)" to keep them.`);
   }
 }
 
