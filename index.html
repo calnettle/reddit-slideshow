@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-01 04:51 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-01 05:00 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -302,6 +302,8 @@
       <button id="ctrl-prev">‹ Prev</button>
       <button id="ctrl-playpause">Pause</button>
       <button id="ctrl-next">Next ›</button>
+      <button id="ctrl-back50">‹‹ 50</button>
+      <button id="ctrl-skip50">50 ››</button>
       <span style="margin-left:12px"></span>
       <label>Interval: <span id="interval-label">1.0s</span></label>
       <input id="ctrl-interval" type="range" min="0.5" max="10" step="0.1" value="1">
@@ -789,13 +791,8 @@ async function fetchPostsByIds(ids, onProgress, existing = []) {
         const isAbort = e.name === "AbortError";
         const wait = Math.min(60_000, 4000 * attempt);
         if (attempt > MAX_RETRIES) {
-          // Save partial results as slides.
-          saveCache({
-            fetchedAt: Date.now(),
-            slides: expandToSlides(out),
-            filename: "(partial)",
-            partial: true,
-          });
+          // Append partial results to the cache (keeps any existing slides).
+          mergeSlidesIntoCache(expandToSlides(out), "(partial)");
           throw new Error(`Batch ${batchNum} failed after ${MAX_RETRIES} retries (${isAbort ? "timeout" : e.message}). ${out.length} posts saved so far — start the slideshow with what you have, or retry.`);
         }
         onProgress?.(out.length, ids.length, `${isAbort ? "timeout" : "error"} on batch ${batchNum}, retry ${attempt}/${MAX_RETRIES} in ${wait/1000}s`);
@@ -1402,13 +1399,13 @@ async function loadFromHTML(file) {
       });
     }
 
-    saveCache({ fetchedAt: Date.now(), slides: finalSlides, filename: file.name });
+    const m = mergeSlidesIntoCache(finalSlides, file.name);
     const galleryNote = galleryItems.length === 0
       ? ""
       : expand
         ? ` ${gallerySlidesAdded} slides from ${galleryItems.length} galleries.`
         : ` ${galleryItems.length} galleries skipped — tick "Expand Reddit galleries" and re-upload to fetch them.`;
-    $("#progress-text").textContent = `Done. ${totalLis} posts → ${finalSlides.length} media slides.${galleryNote} ${skippedOther} non-media skipped.`;
+    $("#progress-text").textContent = `Appended ${m.added} new slide(s) from ${file.name} (${m.total} total).${galleryNote} ${skippedOther} non-media skipped.`;
     renderCacheInfo();
   } catch (e) {
     showError(`Failed to parse HTML: ${e.message}`);
@@ -1426,12 +1423,8 @@ async function loadFromJSON(file) {
     if (!cache || !Array.isArray(cache.slides)) {
       throw new Error("That JSON doesn't look like a slideshow cache (no `slides` array).");
     }
-    saveCache({
-      fetchedAt: cache.fetchedAt || Date.now(),
-      slides: cache.slides,
-      filename: cache.filename || file.name,
-    });
-    $("#progress-text").textContent = `Loaded ${cache.slides.length} slides from ${file.name}.`;
+    const m = mergeSlidesIntoCache(cache.slides, cache.filename || file.name);
+    $("#progress-text").textContent = `Appended ${m.added} new slide(s) from ${file.name} — ${m.total} total in the slideshow.`;
     renderCacheInfo();
   } catch (e) {
     showError(e.message);
@@ -1664,10 +1657,10 @@ async function loadFromCSV(file) {
         $("#progress-text").textContent = `Resolving external videos: ${n} / ${total}…`;
       });
     }
-    saveCache({ fetchedAt: Date.now(), slides, filename: file.name });
+    const m = mergeSlidesIntoCache(slides, file.name);
     $("#progress-text").textContent = usedFallback
-      ? `Done (fallback mode). ${slides.length} of ${limitedRows.length} posts converted directly — galleries/permalinks were skipped because Reddit's API wasn't reachable.`
-      : `Done. ${items.length} posts → ${slides.length} media slides.`;
+      ? `Appended ${m.added} slide(s) (fallback mode) — ${m.total} total. ${slides.length} of ${limitedRows.length} CSV rows converted directly; galleries/permalinks skipped (Reddit API unreachable).`
+      : `Appended ${m.added} new slide(s) from ${file.name} — ${m.total} total in the slideshow.`;
     renderCacheInfo();
   } catch (e) {
     showError(e.message);
@@ -1862,6 +1855,19 @@ function saveCache(cache) {
     }
     showError(`All ${original} slides are loaded and will play now, but there are too many to save for a reload — tap "Download cache (.json)" to keep them.`);
   }
+}
+
+// Append loaded slides to the current cache (dedupe by url) so uploading a file
+// adds to what's already in the slideshow instead of replacing it.
+function mergeSlidesIntoCache(newSlides, filename) {
+  const cache = loadCache() || { fetchedAt: Date.now(), slides: [], filename: "" };
+  const seen = new Set(cache.slides.map(s => s.url));
+  const fresh = (newSlides || []).filter(s => s && s.url && !seen.has(s.url));
+  cache.slides = cache.slides.concat(fresh);
+  cache.fetchedAt = Date.now();
+  cache.filename = cache.filename ? `${cache.filename} + ${filename}` : filename;
+  saveCache(cache);
+  return { added: fresh.length, total: cache.slides.length };
 }
 
 function loadCache() {
@@ -2094,6 +2100,7 @@ const Show = {
 
   next() { this.dir = 1; this.show(this.idx + 1); },
   prev() { this.dir = -1; this.show(this.idx - 1); },
+  skip(n) { this.dir = n >= 0 ? 1 : -1; this.show(this.idx + n); },
 
   togglePlay() {
     this.playing = !this.playing;
@@ -2375,6 +2382,8 @@ $("#start-btn").addEventListener("click", () => {
 
 $("#ctrl-prev").addEventListener("click", () => Show.prev());
 $("#ctrl-next").addEventListener("click", () => Show.next());
+$("#ctrl-back50").addEventListener("click", () => Show.skip(-50));
+$("#ctrl-skip50").addEventListener("click", () => Show.skip(50));
 $("#ctrl-playpause").addEventListener("click", () => Show.togglePlay());
 $("#ctrl-exit").addEventListener("click", () => Show.exit());
 $("#ctrl-shuffle").addEventListener("click", () => Show.reshuffle());
