@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-03 09:55 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-03 10:21 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -1859,25 +1859,31 @@ async function enrichExternalSlides(slides, onProgress) {
  * Cache / panel rendering
  * ============================================================ */
 function saveCache(cache) {
-  try {
-    localStorage.setItem(LS.SAVED, JSON.stringify(cache));
-    delete window.__memoryCache; // fits in storage; localStorage is authoritative
-  } catch (e) {
-    // Too big for browser storage. Keep the FULL set in memory so the entire
-    // slideshow plays this session, and persist as many as fit for reloads.
-    window.__memoryCache = cache;
-    const original = cache.slides.length;
-    let slides = cache.slides.slice();
-    while (slides.length > 100) {
-      slides = slides.slice(0, Math.floor(slides.length * 0.8));
-      try {
-        localStorage.setItem(LS.SAVED, JSON.stringify({ ...cache, slides, trimmed: original }));
-        showError(`All ${original} slides are loaded and will play now. Your browser can only keep ${slides.length} of them after a reload — tap "Download cache (.json)" to save all of them.`);
-        return;
-      } catch (_) { /* keep trimming */ }
+  // NEVER JSON.stringify a huge slides array — for 100k+ slides that builds a
+  // ~100MB+ string and can crash the tab (iOS Safari reloads the page). So
+  // persist at most PERSIST_MAX slides; the full set stays in memory for the
+  // session and the slideshow plays from there.
+  const PERSIST_MAX = 8000;
+  const big = cache.slides.length > PERSIST_MAX;
+  if (big) window.__memoryCache = cache;
+  let n = big ? PERSIST_MAX : cache.slides.length;
+  while (n >= 100) {
+    const persist = n < cache.slides.length
+      ? { ...cache, slides: cache.slides.slice(0, n), trimmed: cache.slides.length }
+      : cache;
+    try {
+      localStorage.setItem(LS.SAVED, JSON.stringify(persist));
+      if (!big) delete window.__memoryCache; // fully persisted; localStorage is authoritative
+      if (n < cache.slides.length) {
+        showError(`All ${cache.slides.length} slides are loaded and will play now. ${n} are saved for reloads — tap "Download cache (.json)" to keep them all.`);
+      }
+      return;
+    } catch (_) {
+      window.__memoryCache = cache;
+      n = Math.floor(n / 2); // halve and retry — bounded, small strings only
     }
-    showError(`All ${original} slides are loaded and will play now, but there are too many to save for a reload — tap "Download cache (.json)" to keep them.`);
   }
+  showError(`All ${cache.slides.length} slides are loaded and will play now, but couldn't be saved for a reload — tap "Download cache (.json)" to keep them.`);
 }
 
 // Append loaded slides to the current cache (dedupe by url) so uploading a file
