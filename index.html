@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-01 05:00 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-03 09:42 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -1084,7 +1084,7 @@ async function fetchPullPushFeed({ subreddit, q, time }, limit, onProgress) {
   if (subreddit) base.subreddit = subreddit;
   if (q) base.q = q;
 
-  const cap = limit > 0 ? limit : 50000; // 0 = "All" (high backstop; Stop or a Dates window bounds it)
+  const cap = limit > 0 ? limit : 200000; // 0 = "All" (high backstop; Stop or a Dates window bounds it)
   const out = [];
   let before = null, page = 0, cutoff = null;
   while (out.length < cap) {
@@ -1119,7 +1119,7 @@ async function fetchPullPushTop({ subreddit, q, time }, limit, onProgress) {
   const newest = await fetchPullPush({ ...base, sort_type: "created_utc", sort: "desc", size: "1" });
   if (!newest.length) return [];
   const anchor = newest[0].created_utc || 0;
-  const cap = limit > 0 ? Math.min(limit, 5000) : 50000; // 0 = "All" → uncap past 5000
+  const cap = limit > 0 ? Math.min(limit, 5000) : 200000; // 0 = "All" → uncap past 5000
   let windowSec = pullpushWindow(time), nWin;
   if (!windowSec) {
     // "All available" → rank across the sub's ENTIRE history (oldest post → now),
@@ -1254,7 +1254,7 @@ async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
   if (subreddit) base.subreddit = subreddit;
   if (title) base.title = title;
   if (after) base.after = String(after);
-  const cap = limit > 0 ? limit : 50000; // 0 = "All"
+  const cap = limit > 0 ? limit : 200000; // 0 = "All"
   const out = [];
   let before = null, page = 0;
   while (out.length < cap) {
@@ -1277,8 +1277,8 @@ async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
 // "Top" = fetch the window's posts (capped) and rank by score client-side,
 // since Arctic Shift has no server-side score sort.
 async function arcticTop({ subreddit, title, after }, limit, onProgress) {
-  const want = limit > 0 ? limit : 50000; // 0 = "All"
-  const poolCap = limit > 0 ? Math.min(5000, Math.max(want * 2, 1000)) : 50000;
+  const want = limit > 0 ? limit : 200000; // 0 = "All"
+  const poolCap = limit > 0 ? Math.min(5000, Math.max(want * 2, 1000)) : 200000;
   const pool = await arcticFeed({ subreddit, title, after }, poolCap, onProgress);
   pool.sort((a, b) => (b.score || 0) - (a.score || 0));
   return pool.slice(0, Math.min(want, pool.length));
