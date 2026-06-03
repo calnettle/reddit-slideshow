@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-03 09:42 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-03 09:55 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -1247,31 +1247,54 @@ async function arcticFetch(params) {
   throw lastErr || new Error("Arctic Shift request failed.");
 }
 
-// Newest-first, paginated via before=<created_utc> (exclusive). Stops at the
-// limit, the time floor (after), or when the archive runs out.
+// Newest-first. Arctic Shift returns 100/request and paginates by date cursor,
+// so to go faster on big scans we split the date range into N segments and
+// page them CONCURRENTLY (~Nx). Small/short fetches use one sequential stream.
 async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
   const base = { limit: "100", sort: "desc" };
   if (subreddit) base.subreddit = subreddit;
   if (title) base.title = title;
-  if (after) base.after = String(after);
   const cap = limit > 0 ? limit : 200000; // 0 = "All"
-  const out = [];
-  let before = null, page = 0;
-  while (out.length < cap) {
-    if (window.__stopFetch) break;
-    page++;
-    const params = { ...base };
-    if (before) params.before = String(before);
-    const batch = await arcticFetch(params);
-    if (!batch.length) break;
-    out.push(...batch);
-    onProgress?.(out.length, page);
-    const last = batch[batch.length - 1]?.created_utc;
-    if (batch.length < 100 || !last) break;
-    before = last;
-    await new Promise(r => setTimeout(r, 150)); // light throttle
+
+  const hi = Math.floor(Date.now() / 1000) + 1;
+  let lo = after || 0;
+  if (!lo) { // "All" with no floor → bound the range by the sub's oldest post
+    const oldest = await arcticFetch({ ...base, sort: "asc", limit: "1" });
+    lo = oldest.length ? (oldest[0].created_utc || 0) - 1 : hi - 31536000;
   }
-  return out.slice(0, cap);
+  const segCount = (cap <= 300 || hi - lo < 2 * 86400) ? 1 : 6;
+  const span = (hi - lo) / segCount;
+
+  const seen = new Set(), all = [];
+  let pages = 0;
+  const keyOf = (p) => p.id || p.permalink || p.url;
+
+  async function scanSegment(segHi, segLo) {
+    let before = segHi;
+    try {
+      while (all.length < cap && !window.__stopFetch) {
+        const params = { ...base, before: String(before) };
+        if (segLo > 0) params.after = String(segLo);
+        const batch = await arcticFetch(params);
+        pages++;
+        if (!batch.length) break;
+        for (const p of batch) { const k = keyOf(p); if (k && !seen.has(k)) { seen.add(k); all.push(p); } }
+        onProgress?.(all.length, pages);
+        const last = batch[batch.length - 1]?.created_utc;
+        if (batch.length < 100 || !last) break;
+        before = last;
+      }
+    } catch (_) { /* a failed segment is skipped; keep what the others got */ }
+  }
+
+  await Promise.all(Array.from({ length: segCount }, (_, i) => {
+    const segHi = Math.floor(hi - i * span);
+    const segLo = i === segCount - 1 ? lo : Math.floor(hi - (i + 1) * span);
+    return scanSegment(segHi, segLo);
+  }));
+
+  all.sort((a, b) => (b.created_utc || 0) - (a.created_utc || 0));
+  return all.slice(0, cap);
 }
 
 // "Top" = fetch the window's posts (capped) and rank by score client-side,
