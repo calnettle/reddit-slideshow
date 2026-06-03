@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-03 10:21 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-03 14:43 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -1084,7 +1084,7 @@ async function fetchPullPushFeed({ subreddit, q, time }, limit, onProgress) {
   if (subreddit) base.subreddit = subreddit;
   if (q) base.q = q;
 
-  const cap = limit > 0 ? limit : 200000; // 0 = "All" (high backstop; Stop or a Dates window bounds it)
+  const cap = limit > 0 ? limit : 500000; // 0 = "All" (high backstop; Stop or a Dates window bounds it)
   const out = [];
   let before = null, page = 0, cutoff = null;
   while (out.length < cap) {
@@ -1119,7 +1119,7 @@ async function fetchPullPushTop({ subreddit, q, time }, limit, onProgress) {
   const newest = await fetchPullPush({ ...base, sort_type: "created_utc", sort: "desc", size: "1" });
   if (!newest.length) return [];
   const anchor = newest[0].created_utc || 0;
-  const cap = limit > 0 ? Math.min(limit, 5000) : 200000; // 0 = "All" → uncap past 5000
+  const cap = limit > 0 ? Math.min(limit, 5000) : 500000; // 0 = "All" → uncap past 5000
   let windowSec = pullpushWindow(time), nWin;
   if (!windowSec) {
     // "All available" → rank across the sub's ENTIRE history (oldest post → now),
@@ -1254,7 +1254,7 @@ async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
   const base = { limit: "100", sort: "desc" };
   if (subreddit) base.subreddit = subreddit;
   if (title) base.title = title;
-  const cap = limit > 0 ? limit : 200000; // 0 = "All"
+  const cap = limit > 0 ? limit : 500000; // 0 = "All"
 
   const hi = Math.floor(Date.now() / 1000) + 1;
   let lo = after || 0;
@@ -1262,7 +1262,7 @@ async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
     const oldest = await arcticFetch({ ...base, sort: "asc", limit: "1" });
     lo = oldest.length ? (oldest[0].created_utc || 0) - 1 : hi - 31536000;
   }
-  const segCount = (cap <= 300 || hi - lo < 2 * 86400) ? 1 : 6;
+  const segCount = (cap <= 300 || hi - lo < 2 * 86400) ? 1 : 12;
   const span = (hi - lo) / segCount;
 
   const seen = new Set(), all = [];
@@ -1300,11 +1300,33 @@ async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
 // "Top" = fetch the window's posts (capped) and rank by score client-side,
 // since Arctic Shift has no server-side score sort.
 async function arcticTop({ subreddit, title, after }, limit, onProgress) {
-  const want = limit > 0 ? limit : 200000; // 0 = "All"
-  const poolCap = limit > 0 ? Math.min(5000, Math.max(want * 2, 1000)) : 200000;
+  const want = limit > 0 ? limit : 500000; // 0 = "All"
+  const poolCap = limit > 0 ? Math.min(5000, Math.max(want * 2, 1000)) : 500000;
   const pool = await arcticFeed({ subreddit, title, after }, poolCap, onProgress);
   pool.sort((a, b) => (b.score || 0) - (a.score || 0));
   return pool.slice(0, Math.min(want, pool.length));
+}
+
+// Build slides from raw posts in chunks, releasing each chunk as it goes, so we
+// never hold the full raw set AND the full slide set at once (halves peak memory
+// on huge scans). Appends to the cache, deduped by url.
+async function ingestPostsChunked(posts, label, onProgress) {
+  const cache = loadCache() || { fetchedAt: Date.now(), slides: [], filename: "" };
+  const seen = new Set(cache.slides.map(s => s.url));
+  const totalPosts = posts.length;
+  let added = 0, media = 0;
+  while (posts.length) {
+    const chunk = posts.splice(0, 4000); // remove + release as we go
+    let slides = expandToSlides(chunk.map(p => ({ kind: "t3", data: p })));
+    if (slides.some(s => s.kind === "external")) slides = await enrichExternalSlides(slides);
+    for (const s of slides) { media++; if (s.url && !seen.has(s.url)) { seen.add(s.url); cache.slides.push(s); added++; } }
+    onProgress?.(`Building slideshow… ${cache.slides.length} slides`);
+    await new Promise(r => setTimeout(r, 0)); // yield: lets GC reclaim the chunk + keeps the UI alive
+  }
+  cache.fetchedAt = Date.now();
+  cache.filename = cache.filename ? `${cache.filename} + ${label}` : label;
+  saveCache(cache);
+  return { added, posts: totalPosts, mediaFound: media, total: cache.slides.length };
 }
 
 async function arcticBrowse(subsRaw, sort, time, limit, onProgress) {
@@ -1317,7 +1339,7 @@ async function arcticBrowse(subsRaw, sort, time, limit, onProgress) {
     ? await arcticTop({ subreddit: subs, after }, limit, (n, p) => onProgress?.(`Scanned ${n} posts (page ${p})…`))
     : await arcticFeed({ subreddit: subs, after }, limit, (n, p) => onProgress?.(`Fetched ${n} posts (page ${p})…`));
   if (!posts.length) throw new Error(`No posts found for r/${subs} on Arctic Shift — check the spelling or widen the dates.`);
-  return ingestChildren(posts.map(s => ({ kind: "t3", data: s })), `r/${subs}${top ? " · top" : ""} (current)`, onProgress);
+  return ingestPostsChunked(posts, `r/${subs}${top ? " · top" : ""} (current)`, onProgress);
 }
 
 async function arcticSearch(query, subRaw, sort, time, limit, onProgress) {
@@ -1331,7 +1353,7 @@ async function arcticSearch(query, subRaw, sort, time, limit, onProgress) {
     ? await arcticTop({ subreddit: sub || undefined, title: q, after }, limit, (n, p) => onProgress?.(`Scanned ${n} posts (page ${p})…`))
     : await arcticFeed({ subreddit: sub || undefined, title: q, after }, limit, (n, p) => onProgress?.(`Found ${n} posts (page ${p})…`));
   if (!posts.length) throw new Error(`No posts matched "${q}"${sub ? ` in r/${sub}` : ""} on Arctic Shift. Try a broader term or widen the dates.`);
-  return ingestChildren(posts.map(s => ({ kind: "t3", data: s })), `search "${q}"${sub ? ` in r/${sub}` : ""} (current)`, onProgress);
+  return ingestPostsChunked(posts, `search "${q}"${sub ? ` in r/${sub}` : ""} (current)`, onProgress);
 }
 
 async function loadFromHTML(file) {
