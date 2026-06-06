@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-06 12:56 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-06 13:09 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -246,6 +246,53 @@
     <div id="arctic-progress" class="muted" style="font-size:12px;margin-top:8px"></div>
   </div>
 
+  <details id="queue-panel" class="panel" style="margin-top:8px">
+    <summary style="cursor:pointer"><strong>Queue (server-side) — scrape multiple subs with your phone closed</strong></summary>
+    <p class="muted" style="font-size:12px;margin:8px 0">Hand a list of subreddits to your Cloudflare Worker; it scrapes them on a schedule (every ~5&nbsp;min) <strong>even when this app is closed</strong>, then you load the results here. One-time setup is in <code>server/README.md</code>. Leave the boxes blank until your Worker is deployed.</p>
+
+    <div class="row" style="margin-top:6px">
+      <input id="q-url" type="text" placeholder="https://reddit-queue.YOURNAME.workers.dev" style="flex:1;min-width:220px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+      <input id="q-key" type="password" placeholder="Queue key" style="width:130px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+      <button id="q-save">Save</button>
+    </div>
+
+    <div style="margin-top:12px">
+      <div class="muted" style="font-size:12px;margin-bottom:4px">Subreddits to queue (comma or space separated)</div>
+      <textarea id="q-subs" rows="2" placeholder="EarthPorn spaceporn natureismetal" style="width:100%;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px"></textarea>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label for="q-limit">Max/sub:</label>
+      <select id="q-limit">
+        <option value="500">500</option>
+        <option value="1000">1000</option>
+        <option value="2500" selected>2500</option>
+        <option value="5000">5000</option>
+        <option value="25000">25000</option>
+        <option value="0">All</option>
+      </select>
+      <label for="q-time" style="margin-left:8px">Dates:</label>
+      <select id="q-time">
+        <option value="all" selected>All time</option>
+        <option value="year">Past year</option>
+        <option value="month">Past month</option>
+        <option value="week">Past week</option>
+        <option value="day">Past day</option>
+      </select>
+      <span class="grow"></span>
+      <button id="q-add" class="primary">Add to queue</button>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <strong style="font-size:13px">Queue status</strong>
+      <span class="grow"></span>
+      <button id="q-refresh">Refresh</button>
+      <button id="q-run" title="Process one scrape slice immediately instead of waiting for the cron">Process now</button>
+      <button id="q-clear">Clear all</button>
+    </div>
+    <div id="q-list" style="margin-top:8px"></div>
+    <div id="q-progress" class="muted" style="font-size:12px;margin-top:8px"></div>
+  </details>
+
   <div id="data-panel" class="panel" style="display:none">
     <div class="row">
       <span>Source: <strong id="source-name">…</strong></span>
@@ -325,6 +372,8 @@ const LS = {
   OAUTH_STATE: "rss.oauth_state",
   PKCE_VERIFIER: "rss.pkce_verifier",
   CUSTOM_PROXY: "rss.custom_proxy",
+  Q_URL: "rss.queue_url",
+  Q_KEY: "rss.queue_key",
 };
 
 /* ============================================================
@@ -2555,6 +2604,121 @@ $("#arctic-search-btn").addEventListener("click", () => runArctic("search"));
 $("#arctic-sub").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); runArctic("browse"); } });
 $("#arctic-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); runArctic("search"); } });
 $("#arctic-sub2").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); runArctic("search"); } });
+
+/* ============================================================
+ * Queue (server-side) — talks to the Cloudflare Worker (server/worker.js)
+ * which scrapes a list of subs on a cron schedule with the phone closed.
+ * The app enqueues subs, polls status, and ingests finished results through
+ * the normal pipeline (ingestPostsChunked → expandToSlides → IndexedDB).
+ * ============================================================ */
+function qBaseUrl() { return (localStorage.getItem(LS.Q_URL) || "").replace(/\/+$/, ""); }
+function qSetProg(msg) { $("#q-progress").textContent = msg; }
+
+async function qFetch(path, opts = {}) {
+  const base = qBaseUrl();
+  if (!base) throw new Error("Set your Worker URL first (the box above), then Save.");
+  const key = localStorage.getItem(LS.Q_KEY) || "";
+  const headers = { ...(opts.headers || {}) };
+  if (key) headers["X-Queue-Key"] = key;
+  if (opts.body) headers["Content-Type"] = "application/json";
+  const res = await fetch(base + path, { ...opts, headers });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Worker HTTP ${res.status}`);
+  return data;
+}
+
+function qFmtAge(ms) { return ms ? formatAge(ms) : ""; }
+
+function renderQueue(idx) {
+  const list = $("#q-list");
+  const jobs = (idx && idx.jobs) || [];
+  if (!jobs.length) { list.innerHTML = '<span class="muted" style="font-size:12px">Queue is empty.</span>'; return; }
+  list.innerHTML = jobs.map(j => {
+    const cap = j.limit > 0 ? ` / ${j.limit}` : "";
+    const badge = j.status === "done" ? "✅ done" : j.status === "running" ? "⏳ scanning…" : j.status === "error" ? "⚠️ error" : "• queued";
+    const canLoad = j.collected > 0;
+    return `<div class="row" style="font-size:13px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="flex:1;min-width:140px"><strong>r/${j.sub}</strong> — ${badge} · ${j.collected || 0}${cap} posts</span>
+      <button data-q-load="${j.sub}" class="primary"${canLoad ? "" : " disabled"}>Load</button>
+      <button data-q-remove="${j.sub}">Remove</button>
+    </div>`;
+  }).join("");
+  list.querySelectorAll("[data-q-load]").forEach(b => b.addEventListener("click", () => qLoad(b.getAttribute("data-q-load"))));
+  list.querySelectorAll("[data-q-remove]").forEach(b => b.addEventListener("click", () => qRemove(b.getAttribute("data-q-remove"))));
+}
+
+async function qRefresh(silent) {
+  try {
+    if (!silent) qSetProg("Checking queue…");
+    const idx = await qFetch("/status");
+    renderQueue(idx);
+    const active = (idx.jobs || []).some(j => j.status === "pending" || j.status === "running");
+    if (!silent) qSetProg(active ? "Scanning in progress — results fill in as the cron runs (or tap “Process now”)." : "");
+    return idx;
+  } catch (e) { if (!silent) qSetProg(e.message); }
+}
+
+async function qLoad(sub) {
+  try {
+    qSetProg(`Loading r/${sub} from the queue…`);
+    const r = await qFetch("/result?sub=" + encodeURIComponent(sub));
+    const posts = r.posts || [];
+    if (!posts.length) { qSetProg(`r/${sub} has no scraped posts yet — let the cron run a bit longer.`); return; }
+    const res = await ingestPostsChunked(posts, `queue:r/${sub}`, (m) => qSetProg(m));
+    qSetProg(`Loaded r/${sub}: added ${res.added} new slide(s) (${res.total} total). Press “Start slideshow”.`);
+    renderCacheInfo();
+  } catch (e) { qSetProg(e.message); }
+}
+
+async function qRemove(sub) {
+  try { const idx = await qFetch("/remove", { method: "POST", body: JSON.stringify({ sub }) }); renderQueue(idx); qSetProg(`Removed r/${sub} from the queue.`); }
+  catch (e) { qSetProg(e.message); }
+}
+
+$("#q-save").addEventListener("click", async () => {
+  const url = ($("#q-url").value || "").trim().replace(/\/+$/, "");
+  const key = ($("#q-key").value || "").trim();
+  if (url) localStorage.setItem(LS.Q_URL, url); else localStorage.removeItem(LS.Q_URL);
+  if (key) localStorage.setItem(LS.Q_KEY, key); else localStorage.removeItem(LS.Q_KEY);
+  if (!url) { qSetProg("Worker URL cleared."); return; }
+  qSetProg("Saved. Testing connection…");
+  try { const h = await fetch(url + "/"); const j = await h.json(); qSetProg(j && j.ok ? `Connected ✓ (${j.jobs} job(s) on the Worker).` : "Saved, but the URL didn't return the expected health response."); await qRefresh(true); }
+  catch (e) { qSetProg(`Saved, but couldn't reach the Worker: ${e.message}`); }
+});
+
+$("#q-add").addEventListener("click", async () => {
+  const subs = ($("#q-subs").value || "").trim();
+  if (!subs) { qSetProg("Type one or more subreddits first."); return; }
+  $("#q-add").disabled = true;
+  try {
+    const idx = await qFetch("/enqueue", { method: "POST", body: JSON.stringify({ subs, time: $("#q-time").value, limit: parseInt($("#q-limit").value, 10) || 0 }) });
+    renderQueue(idx);
+    $("#q-subs").value = "";
+    qSetProg("Queued. The Worker scrapes on its schedule — tap “Process now” to start immediately, or just check back later.");
+  } catch (e) { qSetProg(e.message); }
+  finally { $("#q-add").disabled = false; }
+});
+
+$("#q-refresh").addEventListener("click", () => qRefresh(false));
+$("#q-run").addEventListener("click", async () => {
+  $("#q-run").disabled = true;
+  try {
+    qSetProg("Processing a slice on the Worker…");
+    const r = await qFetch("/run", { method: "POST" });
+    qSetProg(r.idle ? "Nothing left to scrape — all jobs are done." : `Scraped ${r.added || 0} more from r/${r.sub} (${r.collected} total, ${r.status}). Tap again to keep going.`);
+    await qRefresh(true);
+  } catch (e) { qSetProg(e.message); }
+  finally { $("#q-run").disabled = false; }
+});
+$("#q-clear").addEventListener("click", async () => {
+  try { const idx = await qFetch("/clear", { method: "POST" }); renderQueue(idx); qSetProg("Queue cleared."); }
+  catch (e) { qSetProg(e.message); }
+});
+
+// Restore saved Worker URL/key and show current queue on load.
+$("#q-url").value = localStorage.getItem(LS.Q_URL) || "";
+$("#q-key").value = localStorage.getItem(LS.Q_KEY) || "";
+if (qBaseUrl()) qRefresh(true);
 
 $("#reset-btn").addEventListener("click", reset);
 $("#export-btn").addEventListener("click", exportCache);
