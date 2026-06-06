@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-06 13:09 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-06 14:52 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -1289,6 +1289,10 @@ async function arcticFetch(params) {
 // Newest-first. Arctic Shift returns 100/request and paginates by date cursor,
 // so to go faster on big scans we split the date range into N segments and
 // page them CONCURRENTLY (~Nx). Small/short fetches use one sequential stream.
+// Concurrency = 24: probed sweet spot (~3000 posts/s, ~2x of 12, with ZERO
+// rate-limiting). Arctic Shift is HTTP/2 (one connection multiplexes all 24).
+// Higher gains little (36 ≈ +6%) and 48+ trips its rate limiter (429s) and gets
+// SLOWER while hammering a one-person free API — so 24 is the practical cap.
 async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
   const base = { limit: "100", sort: "desc" };
   if (subreddit) base.subreddit = subreddit;
@@ -1301,7 +1305,7 @@ async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
     const oldest = await arcticFetch({ ...base, sort: "asc", limit: "1" });
     lo = oldest.length ? (oldest[0].created_utc || 0) - 1 : hi - 31536000;
   }
-  const segCount = (cap <= 300 || hi - lo < 2 * 86400) ? 1 : 12;
+  const segCount = (cap <= 300 || hi - lo < 2 * 86400) ? 1 : 24;
   const span = (hi - lo) / segCount;
 
   const seen = new Set(), all = [];
