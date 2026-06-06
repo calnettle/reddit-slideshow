@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-06 15:13 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-06 15:45 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -401,6 +401,7 @@ const LS = {
   Q_KEY: "rss.queue_key",
   MINSCORES: "rss.minscores",
   SPEED: "rss.arctic_speed",
+  HIDDEN: "rss.hidden_subs",
 };
 
 /* ============================================================
@@ -2042,8 +2043,10 @@ const SLIDES = {
   subDict: [], subKey: new Map(),               // id -> display name ; lower(name) -> id
   subN: [], subMax: [],                         // per sub id: slide count, max score
   minScore: new Map(),                          // lower(name) -> min upvotes threshold
+  hidden: new Set(),                            // lower(name) of subs toggled OFF (kept, not played)
 };
 function slideCount() { return SLIDES.key.length; }
+const LOCAL_KEY = "__local__"; // reserved hidden-key for the local-files group
 
 // Intern a subreddit name → stable small-int id (case-insensitive; first-seen
 // casing is the display name). Used by every ingest path.
@@ -2083,6 +2086,23 @@ function saveMinScores() {
   const o = {};
   for (const [k, v] of SLIDES.minScore) if (v > 0) o[k] = v;
   try { localStorage.setItem(LS.MINSCORES, JSON.stringify(o)); } catch (_) {}
+}
+
+// Subreddit on/off (hide without deleting). Persisted in LS.HIDDEN.
+function isHidden(name) { return SLIDES.hidden.has(String(name || "").toLowerCase()); }
+function setHidden(name, hide) {
+  const k = String(name || "").toLowerCase();
+  if (hide) SLIDES.hidden.add(k); else SLIDES.hidden.delete(k);
+  saveHidden();
+}
+function loadHidden() {
+  try {
+    const raw = localStorage.getItem(LS.HIDDEN);
+    if (raw) { const a = JSON.parse(raw); if (Array.isArray(a)) SLIDES.hidden = new Set(a.map(s => String(s).toLowerCase())); }
+  } catch (_) {}
+}
+function saveHidden() {
+  try { localStorage.setItem(LS.HIDDEN, JSON.stringify([...SLIDES.hidden])); } catch (_) {}
 }
 
 function persistMeta() {
@@ -2223,15 +2243,19 @@ function countPlayable(filter) {
     || (filter === "image" && k === "image")
     || (filter === "video" && (k === "video" || k === "gif"))
     || (filter === "gif" && k === "gif");
-  // Per-sub-id threshold lookup (built once per call).
+  // Per-sub-id threshold + hidden lookup (built once per call).
   const thr = SLIDES.subDict.map((disp) => minScoreFor(disp));
+  const off = SLIDES.subDict.map((disp) => isHidden(disp));
   let n = 0;
   for (let p = 0; p < SLIDES.key.length; p++) {
+    const id = SLIDES.sub[p];
+    if (off[id]) continue;                       // subreddit toggled off
     if (!want(SLIDES.kind[p])) continue;
-    if (SLIDES.score[p] < thr[SLIDES.sub[p]]) continue;
+    if (SLIDES.score[p] < thr[id]) continue;
     n++;
   }
-  for (const s of (window.__localSlides || [])) if (want(s.kind)) n++; // locals: no scores, always pass
+  const localOff = SLIDES.hidden.has(LOCAL_KEY);
+  if (!localOff) for (const s of (window.__localSlides || [])) if (want(s.kind)) n++; // locals: no scores, always pass
   return n;
 }
 
@@ -2275,9 +2299,10 @@ function fmtScore(n) {
   return n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(n);
 }
 
-// Render the Sources panel: one row per subreddit (count, top score, a
-// min-upvotes input, Remove) plus a row for local files. Also refreshes the
-// "how many will play" readout.
+// Render the Sources panel: one row per subreddit (on/off toggle, count, top
+// score, a min-upvotes input, Remove) plus a row for local files. Also refreshes
+// the "how many will play" readout. Toggling a sub OFF hides it from playback
+// without deleting its slides.
 function renderSources() {
   const list = $("#sources-list");
   if (!list) return;
@@ -2290,20 +2315,37 @@ function renderSources() {
 
   const rows = groups.map(g => {
     const thr = minScoreFor(g.disp);
-    return `<div class="row src-row" style="font-size:13px;padding:6px 0;border-bottom:1px solid var(--border)">
-      <span style="flex:1;min-width:150px"><strong>r/${g.disp}</strong> <span class="muted">· ${g.n} posts · top ↑${fmtScore(g.max)}</span></span>
+    const off = isHidden(g.disp);
+    return `<div class="row src-row" style="font-size:13px;padding:6px 0;border-bottom:1px solid var(--border);opacity:${off ? ".45" : "1"}">
+      <label class="src-toggle" title="${off ? "Off — click to show" : "On — click to hide"}" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+        <input type="checkbox" ${off ? "" : "checked"} data-show-sub="${encodeURIComponent(g.disp)}" style="accent-color:var(--accent,#e0652b)">
+      </label>
+      <span style="flex:1;min-width:140px"><strong>r/${g.disp}</strong> <span class="muted">· ${g.n} posts · top ↑${fmtScore(g.max)}</span></span>
       <label class="muted" style="font-size:12px">min ↑</label>
-      <input type="number" min="0" step="100" value="${thr || ""}" placeholder="0" data-min-sub="${encodeURIComponent(g.disp)}" style="width:90px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:6px;font-size:13px">
+      <input type="number" min="0" step="100" value="${thr || ""}" placeholder="0" ${off ? "disabled" : ""} data-min-sub="${encodeURIComponent(g.disp)}" style="width:84px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:6px;font-size:13px">
       <button data-remove-sub="${encodeURIComponent(g.disp)}" title="Remove this subreddit's posts">✕</button>
     </div>`;
   }).join("");
 
-  const localRow = localN ? `<div class="row" style="font-size:13px;padding:6px 0;border-bottom:1px solid var(--border)">
-      <span style="flex:1;min-width:150px"><strong>local files</strong> <span class="muted">· ${localN} · no upvotes (always play)</span></span>
+  const localOff = SLIDES.hidden.has(LOCAL_KEY);
+  const localRow = localN ? `<div class="row" style="font-size:13px;padding:6px 0;border-bottom:1px solid var(--border);opacity:${localOff ? ".45" : "1"}">
+      <label class="src-toggle" title="${localOff ? "Off — click to show" : "On — click to hide"}" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer">
+        <input type="checkbox" ${localOff ? "" : "checked"} data-show-local="1" style="accent-color:var(--accent,#e0652b)">
+      </label>
+      <span style="flex:1;min-width:140px"><strong>local files</strong> <span class="muted">· ${localN} · no upvotes (always play)</span></span>
       <button data-remove-local="1" title="Remove local files">✕</button>
     </div>` : "";
 
   list.innerHTML = rows + localRow;
+  list.querySelectorAll("[data-show-sub]").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const sub = decodeURIComponent(cb.getAttribute("data-show-sub"));
+      setHidden(sub, !cb.checked);
+      renderSources();
+    });
+  });
+  const lc = list.querySelector("[data-show-local]");
+  if (lc) lc.addEventListener("change", () => { setHidden(LOCAL_KEY, !lc.checked); renderSources(); });
   list.querySelectorAll("[data-min-sub]").forEach(inp => {
     inp.addEventListener("input", () => {
       const sub = decodeURIComponent(inp.getAttribute("data-min-sub")).toLowerCase();
@@ -2336,8 +2378,10 @@ function updateSourcesReadout() {
   const filter = $("#filter-mode") ? $("#filter-mode").value : "all";
   const playable = countPlayable(filter);
   const anyMin = [...SLIDES.minScore.values()].some(v => v > 0);
-  el.textContent = anyMin || filter !== "all"
-    ? `≈ ${playable} of ${total} posts will play with these limits.`
+  const anyHidden = SLIDES.hidden.size > 0;
+  const hiddenNote = anyHidden ? ` (${SLIDES.hidden.size} source${SLIDES.hidden.size > 1 ? "s" : ""} off)` : "";
+  el.textContent = anyMin || anyHidden || filter !== "all"
+    ? `≈ ${playable} of ${total} posts will play with these limits${hiddenNote}.`
     : `${total} posts loaded — no upvote limits set.`;
 }
 
@@ -2970,19 +3014,22 @@ $("#start-btn").addEventListener("click", () => {
     || (filter === "image" && k === "image")
     || (filter === "video" && (k === "video" || k === "gif"))
     || (filter === "gif" && k === "gif");
-  // Per-sub-id minimum-upvote thresholds (0 = include all).
+  // Per-sub-id minimum-upvote thresholds (0 = include all) + on/off state.
   const thr = SLIDES.subDict.map((disp) => minScoreFor(disp));
+  const off = SLIDES.subDict.map((disp) => isHidden(disp));
   // Build the list of slide positions (0..N-1 = IndexedDB, N.. = local files).
   const positions = [];
   for (let p = 0; p < N; p++) {
+    const id = SLIDES.sub[p];
+    if (off[id]) continue;                               // subreddit toggled off
     if (!want(SLIDES.kind[p])) continue;
-    if (SLIDES.score[p] < thr[SLIDES.sub[p]]) continue;  // below this sub's min upvotes
+    if (SLIDES.score[p] < thr[id]) continue;             // below this sub's min upvotes
     positions.push(p);
   }
-  for (let i = 0; i < locals.length; i++) if (want(locals[i].kind)) positions.push(N + i);
+  if (!SLIDES.hidden.has(LOCAL_KEY)) for (let i = 0; i < locals.length; i++) if (want(locals[i].kind)) positions.push(N + i);
   if (!positions.length) {
-    const anyMin = [...SLIDES.minScore.values()].some(v => v > 0);
-    showError(anyMin ? `No posts meet the selected filter + minimum-upvote limits. Lower a threshold in "Sources & minimum upvotes".` : `No slides match the selected filter (${filter}).`);
+    const limited = [...SLIDES.minScore.values()].some(v => v > 0) || SLIDES.hidden.size > 0;
+    showError(limited ? `No posts meet the current filters. Turn a source back on or lower a minimum in "Sources & minimum upvotes".` : `No slides match the selected filter (${filter}).`);
     return;
   }
   Show.start(positions, $("#sort-mode").value);
@@ -3041,6 +3088,7 @@ document.addEventListener("fullscreenchange", () => {
   }
   renderOAuthPanel();
   loadMinScores();
+  loadHidden();
   // Rebuild the in-memory index from slides saved on disk (IndexedDB).
   try {
     await buildIndex((n) => { $("#progress-text").textContent = `Loading saved slides… ${n}`; });
