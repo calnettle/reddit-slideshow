@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-03 14:43 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-06 12:56 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -588,7 +588,7 @@ async function oauthFetchAndProcess() {
         $("#progress-text").textContent = `Resolving external videos: ${n} / ${total}…`;
       });
     }
-    saveCache({ fetchedAt: Date.now(), slides, filename: `reddit:${localStorage.getItem(LS.USERNAME)}` });
+    await appendSlides(slides, `reddit:${localStorage.getItem(LS.USERNAME)}`);
     $("#progress-text").textContent = `Done. ${items.length} posts → ${slides.length} media slides.`;
     renderCacheInfo();
   } catch (e) {
@@ -792,7 +792,7 @@ async function fetchPostsByIds(ids, onProgress, existing = []) {
         const wait = Math.min(60_000, 4000 * attempt);
         if (attempt > MAX_RETRIES) {
           // Append partial results to the cache (keeps any existing slides).
-          mergeSlidesIntoCache(expandToSlides(out), "(partial)");
+          await mergeSlidesIntoCache(expandToSlides(out), "(partial)");
           throw new Error(`Batch ${batchNum} failed after ${MAX_RETRIES} retries (${isAbort ? "timeout" : e.message}). ${out.length} posts saved so far — start the slideshow with what you have, or retry.`);
         }
         onProgress?.(out.length, ids.length, `${isAbort ? "timeout" : "error"} on batch ${batchNum}, retry ${attempt}/${MAX_RETRIES} in ${wait/1000}s`);
@@ -935,9 +935,10 @@ async function fetchRedditShareViaProxy(shareUrl) {
 }
 
 async function addPostsByUrls(urls) {
-  const cache = loadCache() || { fetchedAt: Date.now(), slides: [], filename: "manual additions" };
-  const existingUrls = new Set(cache.slides.map(s => s.url));
-  const existingPermalinks = new Set(cache.slides.map(s => s.post?.permalink));
+  // url/permalink dedupe against already-loaded slides happens in appendSlides
+  // (by url hash); these stay empty so the per-url pre-checks below are no-ops.
+  const existingUrls = new Set();
+  const existingPermalinks = new Set();
 
   const newSlides = [];
   const galleries = []; // { id, post } for proxy fetch
@@ -1014,12 +1015,8 @@ async function addPostsByUrls(urls) {
     finalNew = await enrichExternalSlides(newSlides);
   }
 
-  // Dedupe against existing cache one more time by url.
-  const deduped = finalNew.filter(s => s.url && !existingUrls.has(s.url));
-  cache.slides = cache.slides.concat(deduped);
-  cache.fetchedAt = Date.now();
-  saveCache(cache);
-  return { added: deduped.length, requested: urls.length };
+  const r = await appendSlides(finalNew, "manual additions");
+  return { added: r.added, requested: urls.length };
 }
 
 async function expandGalleriesViaProxy(galleryItems, onProgress) {
@@ -1166,15 +1163,8 @@ async function ingestChildren(children, sourceLabel, onProgress) {
     onProgress?.(`Resolving ${ext} external videos (Redgifs)…`);
     slides = await enrichExternalSlides(slides);
   }
-  const cache = loadCache() || { fetchedAt: Date.now(), slides: [], filename: sourceLabel };
-  const existing = new Set(cache.slides.map(s => s.url));
-  const fresh = slides.filter(s => s.url && !existing.has(s.url));
-  cache.slides = cache.slides.concat(fresh);
-  cache.fetchedAt = Date.now();
-  if (!cache.filename || cache.slides.length === fresh.length) cache.filename = sourceLabel;
-  else if (!cache.filename.split(" + ").includes(sourceLabel)) cache.filename = `${cache.filename} + ${sourceLabel}`;
-  saveCache(cache);
-  return { added: fresh.length, posts: children.length, mediaFound: slides.length };
+  const r = await appendSlides(slides, sourceLabel);
+  return { added: r.added, posts: children.length, mediaFound: slides.length };
 }
 
 async function browseSubreddit(subsRaw, sort, time, limit, onProgress) {
@@ -1311,22 +1301,19 @@ async function arcticTop({ subreddit, title, after }, limit, onProgress) {
 // never hold the full raw set AND the full slide set at once (halves peak memory
 // on huge scans). Appends to the cache, deduped by url.
 async function ingestPostsChunked(posts, label, onProgress) {
-  const cache = loadCache() || { fetchedAt: Date.now(), slides: [], filename: "" };
-  const seen = new Set(cache.slides.map(s => s.url));
   const totalPosts = posts.length;
   let added = 0, media = 0;
   while (posts.length) {
     const chunk = posts.splice(0, 4000); // remove + release as we go
     let slides = expandToSlides(chunk.map(p => ({ kind: "t3", data: p })));
     if (slides.some(s => s.kind === "external")) slides = await enrichExternalSlides(slides);
-    for (const s of slides) { media++; if (s.url && !seen.has(s.url)) { seen.add(s.url); cache.slides.push(s); added++; } }
-    onProgress?.(`Building slideshow… ${cache.slides.length} slides`);
+    media += slides.length;
+    const r = await appendSlides(slides, label); // → IndexedDB; only the light index stays in RAM
+    added += r.added;
+    onProgress?.(`Building slideshow… ${slideCount()} slides`);
     await new Promise(r => setTimeout(r, 0)); // yield: lets GC reclaim the chunk + keeps the UI alive
   }
-  cache.fetchedAt = Date.now();
-  cache.filename = cache.filename ? `${cache.filename} + ${label}` : label;
-  saveCache(cache);
-  return { added, posts: totalPosts, mediaFound: media, total: cache.slides.length };
+  return { added, posts: totalPosts, mediaFound: media, total: slideCount() };
 }
 
 async function arcticBrowse(subsRaw, sort, time, limit, onProgress) {
@@ -1444,7 +1431,7 @@ async function loadFromHTML(file) {
       });
     }
 
-    const m = mergeSlidesIntoCache(finalSlides, file.name);
+    const m = await mergeSlidesIntoCache(finalSlides, file.name);
     const galleryNote = galleryItems.length === 0
       ? ""
       : expand
@@ -1468,7 +1455,7 @@ async function loadFromJSON(file) {
     if (!cache || !Array.isArray(cache.slides)) {
       throw new Error("That JSON doesn't look like a slideshow cache (no `slides` array).");
     }
-    const m = mergeSlidesIntoCache(cache.slides, cache.filename || file.name);
+    const m = await mergeSlidesIntoCache(cache.slides, cache.filename || file.name);
     $("#progress-text").textContent = `Appended ${m.added} new slide(s) from ${file.name} — ${m.total} total in the slideshow.`;
     renderCacheInfo();
   } catch (e) {
@@ -1627,24 +1614,46 @@ function renderLocalList() {
   $("#local-clear").addEventListener("click", (e) => { e.preventDefault(); clearLocalFiles(); });
 }
 
-function getAllSlides() {
-  const cache = loadCache();
-  const cacheSlides = cache?.slides || [];
-  return cacheSlides.concat(window.__localSlides || []);
-}
-
-function exportCache() {
-  const cache = loadCache();
-  if (!cache) return;
-  const blob = new Blob([JSON.stringify(cache)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `reddit-slideshow-cache-${new Date().toISOString().slice(0,10)}.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+// Stream the whole store to a JSON file without ever holding a parsed copy of
+// all slides — a cursor walks IDB and appends each record's JSON to a parts
+// array that's handed straight to a Blob.
+async function exportCache() {
+  if (!slideCount()) return;
+  const btn = $("#export-btn");
+  const label = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "Preparing…"; }
+  try {
+    const d = await idbOpen();
+    const parts = [`{"fetchedAt":${SLIDES.meta.fetchedAt || Date.now()},"filename":${JSON.stringify(SLIDES.meta.filename || "")},"slides":[`];
+    await new Promise((resolve, reject) => {
+      const tx = d.transaction(IDB_STORE, "readonly");
+      const req = tx.objectStore(IDB_STORE).openCursor();
+      let first = true;
+      req.onsuccess = () => {
+        const cur = req.result;
+        if (!cur) { resolve(); return; }
+        const { _seq, ...rest } = cur.value;
+        parts.push((first ? "" : ",") + JSON.stringify(rest));
+        first = false;
+        cur.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    parts.push("]}");
+    const blob = new Blob(parts, { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `reddit-slideshow-cache-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    showError("Couldn't export: " + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+  }
 }
 
 async function loadFromCSV(file) {
@@ -1702,7 +1711,7 @@ async function loadFromCSV(file) {
         $("#progress-text").textContent = `Resolving external videos: ${n} / ${total}…`;
       });
     }
-    const m = mergeSlidesIntoCache(slides, file.name);
+    const m = await mergeSlidesIntoCache(slides, file.name);
     $("#progress-text").textContent = usedFallback
       ? `Appended ${m.added} slide(s) (fallback mode) — ${m.total} total. ${slides.length} of ${limitedRows.length} CSV rows converted directly; galleries/permalinks skipped (Reddit API unreachable).`
       : `Appended ${m.added} new slide(s) from ${file.name} — ${m.total} total in the slideshow.`;
@@ -1878,85 +1887,195 @@ async function enrichExternalSlides(slides, onProgress) {
 }
 
 /* ============================================================
- * Cache / panel rendering
+ * Slide store — IndexedDB + compact in-memory index (streaming)
+ * ------------------------------------------------------------
+ * Slides live ON DISK in IndexedDB. RAM holds only a light index
+ * (key/kind/score/created per slide + a url-hash dedupe set), so memory
+ * stays flat regardless of slide count — 500k+ no longer OOMs the tab.
+ * The slideshow streams each full slide from IDB on demand (see Show).
  * ============================================================ */
-function saveCache(cache) {
-  // NEVER JSON.stringify a huge slides array — for 100k+ slides that builds a
-  // ~100MB+ string and can crash the tab (iOS Safari reloads the page). So
-  // persist at most PERSIST_MAX slides; the full set stays in memory for the
-  // session and the slideshow plays from there.
-  const PERSIST_MAX = 8000;
-  const big = cache.slides.length > PERSIST_MAX;
-  if (big) window.__memoryCache = cache;
-  let n = big ? PERSIST_MAX : cache.slides.length;
-  while (n >= 100) {
-    const persist = n < cache.slides.length
-      ? { ...cache, slides: cache.slides.slice(0, n), trimmed: cache.slides.length }
-      : cache;
-    try {
-      localStorage.setItem(LS.SAVED, JSON.stringify(persist));
-      if (!big) delete window.__memoryCache; // fully persisted; localStorage is authoritative
-      if (n < cache.slides.length) {
-        showError(`All ${cache.slides.length} slides are loaded and will play now. ${n} are saved for reloads — tap "Download cache (.json)" to keep them all.`);
-      }
-      return;
-    } catch (_) {
-      window.__memoryCache = cache;
-      n = Math.floor(n / 2); // halve and retry — bounded, small strings only
-    }
+const IDB_NAME = "rss-slides", IDB_STORE = "slides", IDB_VER = 1;
+let __idbPromise = null;
+function idbOpen() {
+  if (__idbPromise) return __idbPromise;
+  __idbPromise = new Promise((resolve, reject) => {
+    let req;
+    try { req = indexedDB.open(IDB_NAME, IDB_VER); }
+    catch (e) { reject(e); return; }
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains(IDB_STORE)) d.createObjectStore(IDB_STORE, { keyPath: "_seq", autoIncrement: true });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return __idbPromise;
+}
+
+// cyrb53 — fast 53-bit string hash. Collision odds across 500k urls ≈ 3e-5,
+// so url dedupe via a Set of these is effectively exact (and ~5x lighter than
+// holding the url strings themselves).
+function hashUrl(str) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
   }
-  showError(`All ${cache.slides.length} slides are loaded and will play now, but couldn't be saved for a reload — tap "Download cache (.json)" to keep them.`);
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
 }
 
-// Append loaded slides to the current cache (dedupe by url) so uploading a file
-// adds to what's already in the slideshow instead of replacing it.
-function mergeSlidesIntoCache(newSlides, filename) {
-  const cache = loadCache() || { fetchedAt: Date.now(), slides: [], filename: "" };
-  const seen = new Set(cache.slides.map(s => s.url));
-  const fresh = (newSlides || []).filter(s => s && s.url && !seen.has(s.url));
-  cache.slides = cache.slides.concat(fresh);
-  cache.fetchedAt = Date.now();
-  cache.filename = cache.filename ? `${cache.filename} + ${filename}` : filename;
-  saveCache(cache);
-  return { added: fresh.length, total: cache.slides.length };
+// The in-memory index. Parallel arrays keyed by slide position (0..length-1).
+const SLIDES = {
+  key: [], kind: [], score: [], created: [],   // per-slide: IDB key + sort/filter fields
+  seen: new Set(),                              // url hashes, for dedupe
+  counts: {},                                   // {image,gif,video,...} running tallies
+  meta: { filename: "", fetchedAt: 0 },
+};
+function slideCount() { return SLIDES.key.length; }
+
+function persistMeta() {
+  try { localStorage.setItem(LS.SAVED, JSON.stringify({ filename: SLIDES.meta.filename, fetchedAt: SLIDES.meta.fetchedAt, count: SLIDES.key.length })); } catch (_) {}
 }
 
-function loadCache() {
-  if (window.__memoryCache) return window.__memoryCache;
+function noteLabel(label) {
+  if (!label) return;
+  const cur = SLIDES.meta.filename;
+  SLIDES.meta.filename = !cur ? label : (cur.split(" + ").includes(label) ? cur : `${cur} + ${label}`);
+}
+
+// Append slides to the store, deduped by url hash. Writes the full slide
+// objects to IDB and pushes only the light index fields into RAM. Used by every
+// ingest path. Returns { added }.
+async function appendSlides(slides, label) {
+  const fresh = [];
+  for (const s of (slides || [])) {
+    if (!s || !s.url || s.local) continue;
+    const h = hashUrl(s.url);
+    if (SLIDES.seen.has(h)) continue;
+    SLIDES.seen.add(h);
+    fresh.push(s);
+  }
+  if (fresh.length) {
+    const d = await idbOpen();
+    await new Promise((resolve, reject) => {
+      const tx = d.transaction(IDB_STORE, "readwrite");
+      const store = tx.objectStore(IDB_STORE);
+      for (const s of fresh) {
+        const req = store.put(s);
+        req.onsuccess = (e) => {
+          SLIDES.key.push(e.target.result);
+          SLIDES.kind.push(s.kind);
+          SLIDES.score.push(s.post?.score || 0);
+          SLIDES.created.push(s.post?.created_utc || 0);
+          SLIDES.counts[s.kind] = (SLIDES.counts[s.kind] || 0) + 1;
+        };
+      }
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error("IndexedDB write aborted (storage full?)"));
+    });
+  }
+  noteLabel(label);
+  SLIDES.meta.fetchedAt = Date.now();
+  persistMeta();
+  return { added: fresh.length };
+}
+
+// Fetch one full slide object from IDB by its key.
+async function idbGetSlide(key) {
+  const d = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = d.transaction(IDB_STORE, "readonly");
+    const req = tx.objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// Rebuild the in-memory index from whatever is on disk (called on boot). Reads
+// each record once via a cursor — only the light fields are retained.
+async function buildIndex(onProgress) {
+  SLIDES.key.length = 0; SLIDES.kind.length = 0; SLIDES.score.length = 0; SLIDES.created.length = 0;
+  SLIDES.seen.clear(); SLIDES.counts = {};
   const raw = localStorage.getItem(LS.SAVED);
-  return raw ? JSON.parse(raw) : null;
+  if (raw) { try { const m = JSON.parse(raw); SLIDES.meta.filename = m.filename || ""; SLIDES.meta.fetchedAt = m.fetchedAt || 0; } catch (_) {} }
+  let d;
+  try { d = await idbOpen(); } catch (_) { return; }
+  await new Promise((resolve, reject) => {
+    const tx = d.transaction(IDB_STORE, "readonly");
+    const req = tx.objectStore(IDB_STORE).openCursor();
+    let n = 0;
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (!cur) { resolve(); return; }
+      const s = cur.value;
+      SLIDES.key.push(cur.primaryKey);
+      SLIDES.kind.push(s.kind);
+      SLIDES.score.push(s.post?.score || 0);
+      SLIDES.created.push(s.post?.created_utc || 0);
+      SLIDES.counts[s.kind] = (SLIDES.counts[s.kind] || 0) + 1;
+      if (s.url) SLIDES.seen.add(hashUrl(s.url));
+      if (onProgress && (++n % 5000 === 0)) onProgress(n);
+      cur.continue();
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function clearAllSlides() {
+  SLIDES.key.length = 0; SLIDES.kind.length = 0; SLIDES.score.length = 0; SLIDES.created.length = 0;
+  SLIDES.seen.clear(); SLIDES.counts = {}; SLIDES.meta = { filename: "", fetchedAt: 0 };
+  localStorage.removeItem(LS.SAVED);
+  try {
+    const d = await idbOpen();
+    await new Promise((resolve, reject) => {
+      const tx = d.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).clear();
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (_) {}
+}
+
+// Append loaded slides to the store (dedupe by url) so uploading a file adds to
+// what's already loaded instead of replacing it.
+async function mergeSlidesIntoCache(newSlides, filename) {
+  const r = await appendSlides(newSlides, filename);
+  return { added: r.added, total: slideCount() };
 }
 
 function renderCacheInfo() {
-  const cache = loadCache();
-  const cacheSlides = cache?.slides || [];
+  const N = slideCount();
   const localSlides = window.__localSlides || [];
-  const slides = cacheSlides.concat(localSlides);
+  const total = N + localSlides.length;
 
-  if (!slides.length) {
+  if (!total) {
     $("#data-panel").style.display = "none";
-    return null;
+    return 0;
   }
   $("#data-panel").style.display = "block";
 
   const parts = [];
-  if (cache) parts.push(`${cache.filename || "(cached)"} · ${formatAge(cache.fetchedAt)} · ${cacheSlides.length} Reddit`);
+  if (N) parts.push(`${SLIDES.meta.filename || "(saved)"} · ${formatAge(SLIDES.meta.fetchedAt)} · ${N} Reddit`);
   if (localSlides.length) parts.push(`${localSlides.length} local`);
   $("#source-name").textContent = parts.join(" + ");
 
-  const counts = slides.reduce((m, s) => { m[s.kind] = (m[s.kind] || 0) + 1; return m; }, {});
+  const counts = { ...SLIDES.counts };
+  for (const s of localSlides) counts[s.kind] = (counts[s.kind] || 0) + 1;
   $("#stats").innerHTML =
-    `<span class="stat">${slides.length} slides</span>` +
+    `<span class="stat">${total} slides</span>` +
     `<span class="stat">${counts.image || 0} images</span>` +
     `<span class="stat">${counts.gif || 0} gifs</span>` +
     `<span class="stat">${counts.video || 0} videos</span>`;
-  $("#start-btn").disabled = slides.length === 0;
-  return slides;
+  $("#start-btn").disabled = total === 0;
+  return total;
 }
 
 function reset() {
-  localStorage.removeItem(LS.SAVED);
-  delete window.__memoryCache;
+  clearAllSlides();
   clearLocalFiles();
   $("#errors").innerHTML = "";
   $("#progress-text").textContent = "";
@@ -1970,14 +2089,23 @@ function reset() {
  * Slideshow engine
  * ============================================================ */
 const Show = {
-  slides: [], order: [], idx: 0,
+  positions: [], order: [], idx: 0,
+  N: 0, locals: [],
   intervalMs: 1000, holdForVideo: true, playing: true,
   timer: null, progressTimer: null, cursorTimer: null,
-  preloadCache: new Map(),
+  preloadCache: new Map(),   // ref -> { el, slide }
+  _tok: 0,
 
-  start(slides, sortMode = "shuffle") {
-    this.slides = slides;
+  // `positions` is a list of slide positions: 0..N-1 index into the IndexedDB
+  // store (via the in-memory SLIDES index); N.. index into window.__localSlides.
+  // Full slide objects are streamed from IDB on demand in show()/preload().
+  start(positions, sortMode = "shuffle") {
+    this.N = slideCount();
+    this.locals = window.__localSlides || [];
+    this.positions = positions;
     this.sortMode = sortMode;
+    this.dead = new Set();
+    this.preloadCache = new Map();
     this.order = this.buildOrder(sortMode);
     this.idx = 0;
     this.playing = true;
@@ -1989,18 +2117,20 @@ const Show = {
     this.bindCursorHide();
   },
 
+  // Light metadata accessors — read from the in-memory index (no IDB hit), so
+  // sorting/shuffling/dead-skipping stay synchronous and fast even at 500k.
+  createdAt(p) { return p < this.N ? (SLIDES.created[p] || 0) : (this.locals[p - this.N]?.post.created_utc || 0); },
+  scoreAt(p)   { return p < this.N ? (SLIDES.score[p]   || 0) : (this.locals[p - this.N]?.post.score      || 0); },
+  kindAt(p)    { return p < this.N ?  SLIDES.kind[p]          : (this.locals[p - this.N]?.kind); },
+  refOf(p)     { return p < this.N ?  SLIDES.key[p]           : ("L" + (p - this.N)); },
+  async loadAt(p) { return p < this.N ? await idbGetSlide(SLIDES.key[p]) : (this.locals[p - this.N] || null); },
+
   buildOrder(mode) {
-    const indices = this.slides.map((_, i) => i);
-    if (mode === "oldest") {
-      return indices.sort((a, b) => (this.slides[a].post.created_utc || 0) - (this.slides[b].post.created_utc || 0));
-    }
-    if (mode === "newest") {
-      return indices.sort((a, b) => (this.slides[b].post.created_utc || 0) - (this.slides[a].post.created_utc || 0));
-    }
-    if (mode === "score") {
-      return indices.sort((a, b) => (this.slides[b].post.score || 0) - (this.slides[a].post.score || 0));
-    }
-    return shuffle(indices);
+    const pos = this.positions.slice();
+    if (mode === "oldest") return pos.sort((a, b) => this.createdAt(a) - this.createdAt(b));
+    if (mode === "newest") return pos.sort((a, b) => this.createdAt(b) - this.createdAt(a));
+    if (mode === "score")  return pos.sort((a, b) => this.scoreAt(b)  - this.scoreAt(a));
+    return shuffle(pos);
   },
 
   applyPrefs() {
@@ -2023,9 +2153,9 @@ const Show = {
     }));
   },
 
-  markDead(slide) {
+  markDead(ref) {
     if (!this.dead) this.dead = new Set();
-    if (slide && slide.url) this.dead.add(slide.url);
+    if (ref != null) this.dead.add(ref);
   },
 
   // Deleted i.redd.it (130x60) / imgur (161x81) images return a tiny "image
@@ -2035,42 +2165,50 @@ const Show = {
     return w > 0 && w <= 170 && h <= 90;
   },
 
-  preload(slide) {
-    if (!slide) return;
+  // Warm the browser cache for an upcoming position. Streams the slide from IDB
+  // first, then preloads its media element. Keyed by ref so we don't re-fetch.
+  async preloadAt(p) {
+    const ref = this.refOf(p);
+    if (this.dead?.has(ref) || this.preloadCache.has(ref)) return;
+    this.preloadCache.set(ref, null); // reserve the slot so concurrent calls don't double-fetch
+    let slide;
+    try { slide = await this.loadAt(p); } catch (_) { slide = null; }
+    if (!slide) { this.preloadCache.delete(ref); return; }
     materializeSlideUrl(slide);
-    if (!slide.url) return;
-    if (this.preloadCache.has(slide)) return;
+    if (!slide.url) { this.preloadCache.delete(ref); return; }
     let el;
     if (slide.kind === "image") {
       el = new Image();
-      el.onerror = () => this.markDead(slide);
-      el.onload = () => { if (this.isDeadImage(el)) this.markDead(slide); };
+      el.onerror = () => this.markDead(ref);
+      el.onload = () => { if (this.isDeadImage(el)) this.markDead(ref); };
       el.src = slide.url;
     } else {
       el = document.createElement("video");
       el.preload = "auto";
       el.src = slide.url;
     }
-    this.preloadCache.set(slide, el);
+    this.preloadCache.set(ref, { el, slide });
     // Evict oldest if over capacity; revoke blob URLs for local slides to free memory.
     while (this.preloadCache.size > 8) {
-      const oldest = this.preloadCache.keys().next().value;
-      this.preloadCache.delete(oldest);
-      if (oldest.local && oldest.url) {
-        URL.revokeObjectURL(oldest.url);
-        oldest.url = null;
+      const oldestRef = this.preloadCache.keys().next().value;
+      const entry = this.preloadCache.get(oldestRef);
+      this.preloadCache.delete(oldestRef);
+      if (entry?.slide?.local && entry.slide.url) {
+        URL.revokeObjectURL(entry.slide.url);
+        entry.slide.url = null;
       }
     }
   },
 
-  show(i) {
+  async show(i) {
     this.clearTimers();
+    const token = ++this._tok; // any newer show() supersedes this one (IDB load is async)
     this.idx = (i + this.order.length) % this.order.length;
 
     // Skip slides whose media is known-dead (post deleted from Reddit / 404),
     // in the current direction of travel so Prev steps back to a live post.
     let guard = 0;
-    while (this.dead && this.dead.has(this.slides[this.order[this.idx]].url) && guard < this.order.length) {
+    while (this.dead && this.dead.has(this.refOf(this.order[this.idx])) && guard < this.order.length) {
       this.idx = (this.idx + (this.dir || 1) + this.order.length) % this.order.length;
       guard++;
     }
@@ -2079,12 +2217,18 @@ const Show = {
       $("#slide-counter").textContent = "";
       return;
     }
-    const slide = this.slides[this.order[this.idx]];
+
+    const pos = this.order[this.idx];
+    const ref = this.refOf(pos);
+    let slide;
+    try { slide = await this.loadAt(pos); } catch (_) { slide = null; }
+    if (token !== this._tok) return;          // a newer navigation won — drop this render
+    if (!slide) { this.markDead(ref); return this.show(this.idx + (this.dir || 1)); }
     materializeSlideUrl(slide);
 
     for (let k = 1; k <= 3; k++) {
-      const nextIdx = (this.idx + k) % this.order.length;
-      this.preload(this.slides[this.order[nextIdx]]);
+      const nextPos = this.order[(this.idx + k) % this.order.length];
+      this.preloadAt(nextPos);
     }
 
     const wrap = $("#media-wrap");
@@ -2094,7 +2238,7 @@ const Show = {
 
     if (slide.kind === "image") {
       const img = document.createElement("img");
-      const skip = () => { this.markDead(slide); this.show(this.idx + (this.dir || 1)); };
+      const skip = () => { this.markDead(ref); this.show(this.idx + (this.dir || 1)); };
       img.onerror = skip;                                        // gone → skip on
       img.onload = () => { if (this.isDeadImage(img)) skip(); }; // 404 placeholder loads OK
       img.src = slide.url;
@@ -2102,7 +2246,7 @@ const Show = {
       wrap.appendChild(img);
     } else {
       const v = document.createElement("video");
-      v.onerror = () => { this.markDead(slide); this.show(this.idx + (this.dir || 1)); };
+      v.onerror = () => { this.markDead(ref); this.show(this.idx + (this.dir || 1)); };
       v.src = slide.url;
       v.autoplay = true;
       v.muted = true;
@@ -2124,10 +2268,7 @@ const Show = {
     const up = sc >= 1000 ? (sc / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(sc);
     $("#post-title").textContent = `[r/${slide.post.subreddit}${sc ? ` · ↑${up}` : ""}] ${slide.post.title}`;
     $("#post-link").href = slide.post.permalink;
-    const isLive = (si) => !(this.dead && this.dead.has(this.slides[si].url));
-    const liveTotal = this.order.reduce((n, si) => n + (isLive(si) ? 1 : 0), 0);
-    const livePos = this.order.slice(0, this.idx + 1).reduce((n, si) => n + (isLive(si) ? 1 : 0), 0);
-    $("#slide-counter").textContent = `${livePos} / ${liveTotal}`;
+    $("#slide-counter").textContent = `${this.idx + 1} / ${this.order.length}`;
 
     if (this.playing) this.scheduleAdvance(durationMs);
   },
@@ -2165,7 +2306,7 @@ const Show = {
   },
 
   reshuffle() {
-    this.order = shuffle(this.slides.map((_, i) => i));
+    this.order = shuffle(this.positions.slice());
     this.sortMode = "shuffle";
     this.idx = 0;
     this.show(0);
@@ -2174,16 +2315,17 @@ const Show = {
   exit() {
     this.clearTimers();
     this.playing = false;
+    this._tok++; // cancel any in-flight show()
     document.exitFullscreen?.().catch(() => {});
     $("#stage").classList.remove("active");
     $("#media-wrap").innerHTML = "";
     document.body.classList.remove("hide-cursor");
     if (this.cursorTimer) clearTimeout(this.cursorTimer);
     // Release any blob URLs held by the preload cache.
-    for (const slide of this.preloadCache.keys()) {
-      if (slide.local && slide.url) {
-        URL.revokeObjectURL(slide.url);
-        slide.url = null;
+    for (const entry of this.preloadCache.values()) {
+      if (entry?.slide?.local && entry.slide.url) {
+        URL.revokeObjectURL(entry.slide.url);
+        entry.slide.url = null;
       }
     }
     this.preloadCache.clear();
@@ -2417,18 +2559,23 @@ $("#arctic-sub2").addEventListener("keydown", (e) => { if (e.key === "Enter") { 
 $("#reset-btn").addEventListener("click", reset);
 $("#export-btn").addEventListener("click", exportCache);
 $("#start-btn").addEventListener("click", () => {
-  const all = renderCacheInfo();
-  if (!all || !all.length) return;
+  const N = slideCount();
+  const locals = window.__localSlides || [];
+  if (!N && !locals.length) return;
   const filter = $("#filter-mode").value;
-  let slides = all;
-  if (filter === "image") slides = all.filter(s => s.kind === "image");
-  else if (filter === "video") slides = all.filter(s => s.kind === "video" || s.kind === "gif");
-  else if (filter === "gif") slides = all.filter(s => s.kind === "gif");
-  if (!slides.length) {
+  const want = (k) => filter === "all"
+    || (filter === "image" && k === "image")
+    || (filter === "video" && (k === "video" || k === "gif"))
+    || (filter === "gif" && k === "gif");
+  // Build the list of slide positions (0..N-1 = IndexedDB, N.. = local files).
+  const positions = [];
+  for (let p = 0; p < N; p++) if (want(SLIDES.kind[p])) positions.push(p);
+  for (let i = 0; i < locals.length; i++) if (want(locals[i].kind)) positions.push(N + i);
+  if (!positions.length) {
     showError(`No slides match the selected filter (${filter}).`);
     return;
   }
-  Show.start(slides, $("#sort-mode").value);
+  Show.start(positions, $("#sort-mode").value);
 });
 
 $("#ctrl-prev").addEventListener("click", () => Show.prev());
@@ -2465,6 +2612,13 @@ document.addEventListener("fullscreenchange", () => {
     }
   }
   renderOAuthPanel();
+  // Rebuild the in-memory index from slides saved on disk (IndexedDB).
+  try {
+    await buildIndex((n) => { $("#progress-text").textContent = `Loading saved slides… ${n}`; });
+    if (slideCount()) $("#progress-text").textContent = "";
+  } catch (e) {
+    console.warn("Index rebuild failed:", e);
+  }
   renderCacheInfo();
 })();
 </script>
