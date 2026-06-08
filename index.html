@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-08 15:06 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-08 15:19 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -1606,18 +1606,108 @@ async function loadFromHTML(file) {
   }
 }
 
+// Yield the file's text in chunks WITHOUT loading it all at once. Uses the
+// streaming Blob API where available (correct multi-byte handling via
+// TextDecoder), else falls back to reading byte-range slices.
+async function* fileTextChunks(file, chunkSize = 4 * 1024 * 1024) {
+  if (typeof file.stream === "function") {
+    const reader = file.stream().getReader();
+    const dec = new TextDecoder("utf-8");
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) { const tail = dec.decode(); if (tail) yield tail; return; }
+      yield dec.decode(value, { stream: true });
+    }
+  } else {
+    for (let off = 0; off < file.size; off += chunkSize) {
+      yield await file.slice(off, off + chunkSize).text();
+    }
+  }
+}
+
+// Stream-import a cache .json ({fetchedAt,filename,slides:[...]}) straight into
+// IndexedDB. We scan the slides array char-by-char (string/escape/depth aware),
+// emit one complete object at a time, and flush them to appendSlides in batches —
+// so a 200MB+ file never loads its whole text OR its whole parsed array into RAM
+// (which was crashing Safari). Returns { added, total }.
+async function importCacheStreaming(file, onProgress) {
+  const FLUSH = 2000;
+  let phase = "pre", pre = "", label = file.name;
+  let inString = false, escaped = false, depth = 0, carry = "", done = false;
+  let batch = [], added = 0, count = 0, bad = 0;
+
+  const flush = async () => {
+    if (!batch.length) return;
+    const slides = batch; batch = [];
+    const r = await appendSlides(slides); // label applied once at the end (it may itself contain " + ")
+    added += r.added;
+    onProgress?.(`Importing… ${slideCount()} slides`);
+    await new Promise(r => setTimeout(r, 0)); // yield: repaint + let GC reclaim
+  };
+  const emit = async (textPiece) => {
+    const t = textPiece.trim();
+    if (!t) return;
+    try { batch.push(JSON.parse(t)); count++; } catch (_) { bad++; }
+    if (batch.length >= FLUSH) await flush();
+  };
+
+  // Scan one chunk of array-body text; persists string/depth state across chunks.
+  const scanArr = async (chunk) => {
+    let elemStart = 0;
+    for (let i = 0; i < chunk.length && !done; i++) {
+      const c = chunk.charCodeAt(i);
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (c === 92) escaped = true;        // backslash
+        else if (c === 34) inString = false;      // closing quote
+        continue;
+      }
+      if (c === 34) { inString = true; }          // opening quote
+      else if (c === 123 || c === 91) depth++;    // { or [
+      else if (c === 125) depth--;                // }
+      else if (c === 93) {                        // ]
+        if (depth === 0) { await emit(carry + chunk.slice(elemStart, i)); carry = ""; done = true; break; }
+        depth--;
+      } else if (c === 44 && depth === 0) {        // top-level comma → element boundary
+        await emit(carry + chunk.slice(elemStart, i)); carry = "";
+        elemStart = i + 1;
+      }
+    }
+    if (!done) carry += chunk.slice(elemStart);
+  };
+
+  for await (const chunk of fileTextChunks(file)) {
+    if (done) break;
+    if (phase === "pre") {
+      pre += chunk;
+      const m = /"slides"\s*:\s*\[/.exec(pre);
+      if (!m) {
+        if (pre.length > 2_000_000) throw new Error("That JSON doesn't look like a slideshow cache (no `slides` array).");
+        continue; // keep buffering the small preamble
+      }
+      const fm = /"filename"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(pre);
+      if (fm) { try { label = JSON.parse('"' + fm[1] + '"') || file.name; } catch (_) {} }
+      const rest = pre.slice(m.index + m[0].length);
+      phase = "arr"; pre = "";
+      await scanArr(rest);
+    } else {
+      await scanArr(chunk);
+    }
+  }
+  if (phase === "pre") throw new Error("That JSON doesn't look like a slideshow cache (no `slides` array).");
+  await flush();
+  noteLabel(label); persistMeta();   // record the source label once
+  return { added, total: slideCount(), parsed: count, bad };
+}
+
 async function loadFromJSON(file) {
   $("#errors").innerHTML = "";
-  $("#progress-text").textContent = "Reading cache file…";
+  $("#progress-text").textContent = "Importing cache file…";
   $("#data-panel").style.display = "block";
   try {
-    const text = await file.text();
-    const cache = JSON.parse(text);
-    if (!cache || !Array.isArray(cache.slides)) {
-      throw new Error("That JSON doesn't look like a slideshow cache (no `slides` array).");
-    }
-    const m = await mergeSlidesIntoCache(cache.slides, cache.filename || file.name);
-    $("#progress-text").textContent = `Appended ${m.added} new slide(s) from ${file.name} — ${m.total} total in the slideshow.`;
+    const m = await importCacheStreaming(file, (msg) => { $("#progress-text").textContent = msg; });
+    const badNote = m.bad ? ` (${m.bad} unreadable entries skipped)` : "";
+    $("#progress-text").textContent = `Appended ${m.added} new slide(s) from ${file.name} — ${m.total} total in the slideshow${badNote}.`;
     renderCacheInfo();
   } catch (e) {
     showError(e.message);
@@ -2168,7 +2258,11 @@ function persistMeta() {
 function noteLabel(label) {
   if (!label) return;
   const cur = SLIDES.meta.filename;
-  SLIDES.meta.filename = !cur ? label : (cur.split(" + ").includes(label) ? cur : `${cur} + ${label}`);
+  if (!cur) { SLIDES.meta.filename = label; return; }
+  // Skip if already present — handles both single atoms and multi-part labels
+  // (e.g. re-importing a cache whose own label contains " + ").
+  if (cur === label || cur.split(" + ").includes(label) || cur.includes(label)) return;
+  SLIDES.meta.filename = `${cur} + ${label}`;
 }
 
 // Append slides to the store, deduped by url hash. Writes the full slide
