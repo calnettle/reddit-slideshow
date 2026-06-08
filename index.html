@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-08 15:19 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-08 15:22 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -1875,23 +1875,28 @@ async function exportCache() {
   if (btn) { btn.disabled = true; btn.textContent = "Preparing…"; }
   try {
     const d = await idbOpen();
-    const parts = [`{"fetchedAt":${SLIDES.meta.fetchedAt || Date.now()},"filename":${JSON.stringify(SLIDES.meta.filename || "")},"slides":[`];
+    // Flush every SEG slides into a disk-backable Blob segment so we never hold
+    // the whole ~200MB+ JSON as strings in RAM (which would OOM as the set grows).
+    const SEG = 5000;
+    const blobParts = [`{"fetchedAt":${SLIDES.meta.fetchedAt || Date.now()},"filename":${JSON.stringify(SLIDES.meta.filename || "")},"slides":[`];
+    let buf = [], first = true;
+    const flushSeg = () => { if (buf.length) { blobParts.push(new Blob([buf.join("")])); buf = []; } };
     await new Promise((resolve, reject) => {
       const tx = d.transaction(IDB_STORE, "readonly");
       const req = tx.objectStore(IDB_STORE).openCursor();
-      let first = true;
       req.onsuccess = () => {
         const cur = req.result;
-        if (!cur) { resolve(); return; }
+        if (!cur) { flushSeg(); resolve(); return; }
         const { _seq, ...rest } = cur.value;
-        parts.push((first ? "" : ",") + JSON.stringify(rest));
+        buf.push((first ? "" : ",") + JSON.stringify(rest));
         first = false;
+        if (buf.length >= SEG) flushSeg();
         cur.continue();
       };
       req.onerror = () => reject(req.error);
     });
-    parts.push("]}");
-    const blob = new Blob(parts, { type: "application/json" });
+    blobParts.push("]}");
+    const blob = new Blob(blobParts, { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
