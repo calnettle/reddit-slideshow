@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-06 15:45 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-08 15:06 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -1337,11 +1337,22 @@ function getArcticSpeed() {
 // faster up to a point, but past ~24 Arctic Shift's rate limiter kicks in and it
 // gets slower; the per-segment retry below keeps a throttled scan from quitting
 // early instead of stopping at ~25k. Small/short fetches use one stream.
-async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
+//
+// Two modes:
+//  - legacy (no onBatch): collect every post into `all`, sort, return the array.
+//    Fine for bounded fetches (≤ a few thousand).
+//  - STREAMING (onBatch given): hand each rolling ~1000-post buffer to onBatch as
+//    it's scanned and NEVER keep the full set in RAM. This is what stops huge
+//    "All" scans (450k+) from OOM-ing the tab — we used to buffer the entire raw
+//    post set (~1GB at 450k) before writing anything to IndexedDB. Returns the
+//    scanned count. Cross-segment dedupe is handled downstream by appendSlides
+//    (url hash), so no `seen` set is held here.
+async function arcticFeed({ subreddit, title, after }, limit, onProgress, onBatch) {
   const base = { limit: "100", sort: "desc" };
   if (subreddit) base.subreddit = subreddit;
   if (title) base.title = title;
   const cap = limit > 0 ? limit : 500000; // 0 = "All"
+  const streaming = typeof onBatch === "function";
 
   const hi = Math.floor(Date.now() / 1000) + 1;
   let lo = after || 0;
@@ -1352,13 +1363,15 @@ async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
   const segCount = (cap <= 300 || hi - lo < 2 * 86400) ? 1 : getArcticSpeed();
   const span = (hi - lo) / segCount;
 
-  const seen = new Set(), all = [];
-  let pages = 0;
+  const seen = streaming ? null : new Set();
+  const all = streaming ? null : [];
+  let scanned = 0, pages = 0;
   const keyOf = (p) => p.id || p.permalink || p.url;
 
   async function scanSegment(segHi, segLo) {
-    let before = segHi, fails = 0;
-    while (all.length < cap && !window.__stopFetch) {
+    let before = segHi, fails = 0, buf = streaming ? [] : null;
+    const flush = async () => { if (buf && buf.length) { const c = buf; buf = []; await onBatch(c); } };
+    while (scanned < cap && !window.__stopFetch) {
       let batch;
       try {
         const params = { ...base, before: String(before) };
@@ -1374,12 +1387,20 @@ async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
       }
       pages++;
       if (!batch.length) break;
-      for (const p of batch) { const k = keyOf(p); if (k && !seen.has(k)) { seen.add(k); all.push(p); } }
-      onProgress?.(all.length, pages);
+      if (streaming) {
+        for (const p of batch) buf.push(p);
+        scanned += batch.length;
+        if (buf.length >= 1000) await flush(); // backpressure: this segment pauses while its buffer drains to IDB
+      } else {
+        for (const p of batch) { const k = keyOf(p); if (k && !seen.has(k)) { seen.add(k); all.push(p); } }
+        scanned = all.length;
+      }
+      onProgress?.(scanned, pages);
       const last = batch[batch.length - 1]?.created_utc;
       if (batch.length < 100 || !last) break;
       before = last;
     }
+    if (streaming) await flush();
   }
 
   await Promise.all(Array.from({ length: segCount }, (_, i) => {
@@ -1388,8 +1409,25 @@ async function arcticFeed({ subreddit, title, after }, limit, onProgress) {
     return scanSegment(segHi, segLo);
   }));
 
+  if (streaming) return scanned;
   all.sort((a, b) => (b.created_utc || 0) - (a.created_utc || 0));
   return all.slice(0, cap);
+}
+
+// Streaming ingest for big "All" scans: posts flow straight from the scan into
+// IndexedDB in ~1000-post batches, so peak memory is a small rolling buffer +
+// the compact index — never the full raw post set. Returns the runArctic shape.
+async function arcticStream(params, limit, label, onProgress) {
+  const startCount = slideCount();
+  const ingest = async (posts) => {
+    let slides = expandToSlides(posts.map(p => ({ kind: "t3", data: p })));
+    if (slides.some(s => s.kind === "external")) slides = await enrichExternalSlides(slides);
+    await appendSlides(slides, label);
+    onProgress?.(`Scanning & saving… ${slideCount()} slides so far`);
+  };
+  const scanned = await arcticFeed(params, limit, (n, p) => onProgress?.(`Scanned ${n} posts (page ${p})…`), ingest);
+  const added = slideCount() - startCount;
+  return { added, posts: scanned, mediaFound: added, total: slideCount() };
 }
 
 // "Top" = fetch the window's posts (capped) and rank by score client-side,
@@ -1421,17 +1459,29 @@ async function ingestPostsChunked(posts, label, onProgress) {
   return { added, posts: totalPosts, mediaFound: media, total: slideCount() };
 }
 
+// Big "All" scans (or anything over a few thousand) stream straight to IDB so
+// they can't OOM; smaller bounded fetches keep the legacy collect-then-ingest
+// path (and "Top" ranking, which needs the whole bounded pool in hand).
+const ARCTIC_STREAM_OVER = 20000;
+function arcticShouldStream(limit) { return limit === 0 || limit > ARCTIC_STREAM_OVER; }
+
 async function arcticBrowse(subsRaw, sort, time, limit, onProgress) {
   const subs = (subsRaw || "").trim().replace(/^\/?(r\/)?/i, "").replace(/[\s+].*$/, "");
   if (!subs) throw new Error("Enter a subreddit name first.");
   const after = arcticAfter(time);
   const top = sort === "top";
+  const label = `r/${subs}${top ? " · top" : ""} (current)`;
   onProgress?.(top ? `Ranking r/${subs} by upvotes (Arctic Shift)…` : `Fetching r/${subs} from Arctic Shift…`);
+  if (arcticShouldStream(limit)) { // huge scan → stream to disk, never buffer it all
+    const res = await arcticStream({ subreddit: subs, after }, limit, label, onProgress);
+    if (!res.posts) throw new Error(`No posts found for r/${subs} on Arctic Shift — check the spelling or widen the dates.`);
+    return res;
+  }
   const posts = top
     ? await arcticTop({ subreddit: subs, after }, limit, (n, p) => onProgress?.(`Scanned ${n} posts (page ${p})…`))
     : await arcticFeed({ subreddit: subs, after }, limit, (n, p) => onProgress?.(`Fetched ${n} posts (page ${p})…`));
   if (!posts.length) throw new Error(`No posts found for r/${subs} on Arctic Shift — check the spelling or widen the dates.`);
-  return ingestPostsChunked(posts, `r/${subs}${top ? " · top" : ""} (current)`, onProgress);
+  return ingestPostsChunked(posts, label, onProgress);
 }
 
 async function arcticSearch(query, subRaw, sort, time, limit, onProgress) {
@@ -1440,12 +1490,18 @@ async function arcticSearch(query, subRaw, sort, time, limit, onProgress) {
   const sub = (subRaw || "").trim().replace(/^\/?(r\/)?/i, "").replace(/[\s+].*$/, "");
   const after = arcticAfter(time);
   const top = sort === "top";
+  const label = `search "${q}"${sub ? ` in r/${sub}` : ""} (current)`;
   onProgress?.(`Searching Arctic Shift for "${q}"…`);
+  if (arcticShouldStream(limit)) {
+    const res = await arcticStream({ subreddit: sub || undefined, title: q, after }, limit, label, onProgress);
+    if (!res.posts) throw new Error(`No posts matched "${q}"${sub ? ` in r/${sub}` : ""} on Arctic Shift. Try a broader term or widen the dates.`);
+    return res;
+  }
   const posts = top
     ? await arcticTop({ subreddit: sub || undefined, title: q, after }, limit, (n, p) => onProgress?.(`Scanned ${n} posts (page ${p})…`))
     : await arcticFeed({ subreddit: sub || undefined, title: q, after }, limit, (n, p) => onProgress?.(`Found ${n} posts (page ${p})…`));
   if (!posts.length) throw new Error(`No posts matched "${q}"${sub ? ` in r/${sub}` : ""} on Arctic Shift. Try a broader term or widen the dates.`);
-  return ingestPostsChunked(posts, `search "${q}"${sub ? ` in r/${sub}` : ""} (current)`, onProgress);
+  return ingestPostsChunked(posts, label, onProgress);
 }
 
 async function loadFromHTML(file) {
