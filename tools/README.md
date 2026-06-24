@@ -21,12 +21,22 @@ grabs the recent ~1000 + everything new; use the GDPR export for the full histor
 
 1. In **Safari**, open **https://old.reddit.com** and make sure you're **signed in**.
 2. Tap **Share** (the share icon) → **Export Reddit Saved**.
-3. It pages through your saved posts and saves a `reddit-saved-….json` file.
-4. Open the slideshow → **Upload** that JSON file. It auto-detects the Reddit
-   listing and runs it through the normal media pipeline (images/galleries/
-   Redgifs/videos), tagged as the source **reddit saved: <you>**.
+3. It saves a `reddit-saved-….json` file. **Each run grabs ~9 seconds' worth**
+   (Apple kills this action if JS runs too long), then remembers where it
+   stopped. **If the result says `"more": true`, run it again** to get the next
+   chunk — repeat until `"done": true`. Two or three runs covers the full ~1000.
+4. Open the slideshow → **Upload** each JSON file. It auto-detects the Reddit
+   listing, dedupes, and runs it through the normal media pipeline (images/
+   galleries/Redgifs/videos), tagged **reddit saved: <you>**.
 
-Re-run anytime to pull in new saves — it dedupes against what's already loaded.
+Once it says `done`, the next run starts fresh from your newest saves, so re-run
+anytime to pull in new ones — duplicates are ignored on import.
+
+### Why multiple runs?
+Apple's "Run JavaScript on Web Page" shares Safari's short JS time limit and
+fails if the script runs too long ("took too long to call the completion
+handler"). Paging ~1000 saved posts can't finish in that window, so the script
+self-limits to ~9s and resumes via a cursor saved in the page's localStorage.
 
 ## Troubleshooting
 
