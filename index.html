@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-24 12:28 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-24 13:08 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -104,7 +104,7 @@
       <li>Drop it below.</li>
     </ol>
     <label class="dropzone" id="dropzone">
-      <input id="csv-file" type="file" accept=".csv,text/csv,.json,application/json,.html,text/html">
+      <input id="csv-file" type="file" accept=".csv,text/csv,.json,application/json,.html,text/html,.txt,text/plain">
       <div><strong>Click to choose</strong> or drag <code>saved_posts.csv</code>, <code>reddit_export.html</code>, or <code>cache.json</code> here</div>
       <div class="muted" style="margin-top:6px;font-size:12px">Posts in private/quarantined subs are skipped. Reddit's public JSON endpoints are rate-limited; large exports take a minute.</div>
     </label>
@@ -884,8 +884,17 @@ async function fetchPostsByIds(ids, onProgress, existing = []) {
 }
 
 async function loadFromFile(file) {
-  if (/\.json$/i.test(file.name) || file.type === "application/json") return loadFromJSON(file);
-  if (/\.html?$/i.test(file.name) || file.type === "text/html") return loadFromHTML(file);
+  const name = file.name || "";
+  if (/\.json$/i.test(name) || file.type === "application/json") return loadFromJSON(file);
+  if (/\.html?$/i.test(name) || file.type === "text/html") return loadFromHTML(file);
+  if (/\.csv$/i.test(name) || file.type === "text/csv") return loadFromCSV(file);
+  // Unknown extension (e.g. a Shortcut export saved as .txt) — route by CONTENT,
+  // so the saved-posts JSON works no matter what the OS named it.
+  try {
+    const head = (await file.slice(0, 65536).text()).replace(/^﻿/, "").trimStart();
+    if (head[0] === "{" || head[0] === "[" || /"(slides|children)"\s*:/.test(head)) return loadFromJSON(file);
+    if (/^<(!doctype|html)/i.test(head)) return loadFromHTML(file);
+  } catch (_) { /* fall through to CSV */ }
   return loadFromCSV(file);
 }
 
