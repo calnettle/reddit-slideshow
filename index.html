@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-08 15:22 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-24 12:28 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -1631,14 +1631,22 @@ async function* fileTextChunks(file, chunkSize = 4 * 1024 * 1024) {
 // so a 200MB+ file never loads its whole text OR its whole parsed array into RAM
 // (which was crashing Safari). Returns { added, total }.
 async function importCacheStreaming(file, onProgress) {
-  const FLUSH = 2000;
-  let phase = "pre", pre = "", label = file.name;
+  const FLUSH = 1500;
+  let phase = "pre", pre = "", label = file.name, mode = "slides";
   let inString = false, escaped = false, depth = 0, carry = "", done = false;
   let batch = [], added = 0, count = 0, bad = 0;
 
   const flush = async () => {
     if (!batch.length) return;
-    const slides = batch; batch = [];
+    const items = batch; batch = [];
+    // "slides" file → items are already slide objects. "children" file (a raw
+    // Reddit listing, e.g. from the Saved-posts Shortcut) → run them through the
+    // normal media pipeline first so galleries/Redgifs/etc. are handled here.
+    let slides = items;
+    if (mode === "children") {
+      slides = expandToSlides(items);
+      if (slides.some(s => s.kind === "external")) slides = await enrichExternalSlides(slides);
+    }
     const r = await appendSlides(slides); // label applied once at the end (it may itself contain " + ")
     added += r.added;
     onProgress?.(`Importing… ${slideCount()} slides`);
@@ -1676,17 +1684,25 @@ async function importCacheStreaming(file, onProgress) {
     if (!done) carry += chunk.slice(elemStart);
   };
 
+  const NOT_CACHE = "That JSON isn't a slideshow cache or a Reddit listing (no `slides` or `children` array).";
   for await (const chunk of fileTextChunks(file)) {
     if (done) break;
     if (phase === "pre") {
       pre += chunk;
-      const m = /"slides"\s*:\s*\[/.exec(pre);
+      // Accept either a slideshow cache ({slides:[…]}) or a raw Reddit listing
+      // ({children:[…]}, e.g. saved.json from the Saved-posts Shortcut).
+      const m = /"(slides|children)"\s*:\s*\[/.exec(pre);
       if (!m) {
-        if (pre.length > 2_000_000) throw new Error("That JSON doesn't look like a slideshow cache (no `slides` array).");
+        if (pre.length > 2_000_000) throw new Error(NOT_CACHE);
         continue; // keep buffering the small preamble
       }
+      mode = m[1] === "children" ? "children" : "slides";
       const fm = /"filename"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(pre);
       if (fm) { try { label = JSON.parse('"' + fm[1] + '"') || file.name; } catch (_) {} }
+      else if (mode === "children") {
+        const um = /"user"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(pre);
+        label = um ? `reddit saved: ${um[1]}` : "reddit saved";
+      }
       const rest = pre.slice(m.index + m[0].length);
       phase = "arr"; pre = "";
       await scanArr(rest);
@@ -1694,10 +1710,10 @@ async function importCacheStreaming(file, onProgress) {
       await scanArr(chunk);
     }
   }
-  if (phase === "pre") throw new Error("That JSON doesn't look like a slideshow cache (no `slides` array).");
+  if (phase === "pre") throw new Error(NOT_CACHE);
   await flush();
   noteLabel(label); persistMeta();   // record the source label once
-  return { added, total: slideCount(), parsed: count, bad };
+  return { added, total: slideCount(), parsed: count, bad, mode };
 }
 
 async function loadFromJSON(file) {
