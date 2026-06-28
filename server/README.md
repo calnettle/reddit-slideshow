@@ -1,3 +1,34 @@
+# OAuth proxy (Cloudflare Worker) — for full-media saved posts
+
+**File: [`oauth-proxy.js`](oauth-proxy.js).** Reddit edge-blocks `oauth.reddit.com`
+from non-Reddit websites, so the slideshow can't call the API directly. This
+Worker makes that call **server-side** and returns it with CORS, so the app can
+pull your saved posts **with galleries + videos**, no time limit, on the API's
+high rate limits.
+
+## Deploy (~5 min, no KV/secret needed)
+
+```sh
+cd server
+wrangler deploy oauth-proxy.js --name reddit-oauth
+```
+…or in the Cloudflare dashboard: **Create Worker → paste `oauth-proxy.js` → Deploy.**
+
+It prints a URL like `https://reddit-oauth.<you>.workers.dev`. In the slideshow:
+**Option A → "Or paste an access token" → Worker proxy URL** → paste it → **Save**.
+
+## Use it
+1. Grab a fresh token with the **Reddit Token** shortcut on `sh.reddit.com`
+   (see `../tools/README.md`).
+2. In the app: paste the token → **Use this token** → **Fetch saved posts**.
+3. The app pulls everything via your Worker — galleries and videos included.
+   Tokens last ~1h; grab a fresh one per session.
+
+The Worker only forwards to `oauth.reddit.com` and only with the token you send
+in the `X-Reddit-Token` header — it stores nothing.
+
+---
+
 # Server-side scrape queue (Cloudflare Worker)
 
 Scrapes a queue of subreddits from Arctic Shift **on a schedule, with your phone
