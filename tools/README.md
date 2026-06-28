@@ -33,10 +33,16 @@ Once it says `done`, the next run starts fresh from your newest saves, so re-run
 anytime to pull in new ones — duplicates are ignored on import.
 
 ### Why multiple runs?
-Apple's "Run JavaScript on Web Page" shares Safari's short JS time limit and
-fails if the script runs too long ("took too long to call the completion
-handler"). Paging ~1000 saved posts can't finish in that window, so the script
-self-limits to ~9s and resumes via a cursor saved in the page's localStorage.
+Apple's "Run JavaScript on Web Page" has a **hard ~1–2 second** time limit (their
+docs say a 1s timer is fine but a 5s one "might not complete in time"). Paging
+~1000 saved posts can't finish in that window, so the script grabs a few pages
+per run (within a ~1.5s deadline), saves its place in the page's localStorage,
+and you run it again until `"done": true`. A few hundred saved posts = a couple
+of runs; ~1000 = several. Space runs ~20–30s apart if Reddit starts throttling.
+
+If you still get **"took too long"**, lower `DEADLINE_MS` at the top of the
+script to `1200`. If every run finishes instantly and you want fewer runs, raise
+it toward `1800`.
 
 ## Troubleshooting
 
