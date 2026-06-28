@@ -40,6 +40,12 @@ self-limits to ~9s and resumes via a cursor saved in the page's localStorage.
 
 ## Troubleshooting
 
+- **"took too long to call the completion handler"** → you're on an old copy of
+  the script. The current version self-limits each run to ~5s and aborts any
+  stalled request, so it can't hit that error. Re-paste the latest
+  `reddit-saved-shortcut.js` into the action.
+- **"Reddit was slow… run it again"** → Reddit throttled your repeated pulls.
+  Wait ~10–20s and run it again; progress is saved, so it continues.
 - **"Not logged in"** → you weren't signed in on the page; open old.reddit.com signed in and retry.
 - **count: 0 / nothing imported** → run it on **old.reddit.com** specifically (most reliable for `.json`); make sure it's the front page or your profile, not a logged-out tab.
 - **Only ~1000 came in** → that's Reddit's hard listing cap; the GDPR export is the only source for older saves.
