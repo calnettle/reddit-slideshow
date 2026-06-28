@@ -17,32 +17,34 @@ grabs the recent ~1000 + everything new; use the GDPR export for the full histor
 4. Add action **"Save File"** → turn ON **Ask Where to Save** (so you can pick iCloud Drive / Files).
 5. Name it **Export Reddit Saved**. Done.
 
-## Use it
+## Use it  (the reliable "page-read" way)
 
-1. In **Safari**, open **https://old.reddit.com** and make sure you're **signed in**.
-2. Tap **Share** (the share icon) → **Export Reddit Saved**.
-3. It saves a `reddit-saved-….json` file. **Each run grabs ~9 seconds' worth**
-   (Apple kills this action if JS runs too long), then remembers where it
-   stopped. **If the result says `"more": true`, run it again** to get the next
-   chunk — repeat until `"done": true`. Two or three runs covers the full ~1000.
-4. Open the slideshow → **Upload** each JSON file. It auto-detects the Reddit
-   listing, dedupes, and runs it through the normal media pipeline (images/
-   galleries/Redgifs/videos), tagged **reddit saved: <you>**.
+Apple's "Run JavaScript on Web Page" has a **hard ~1–2 second** limit, and
+Reddit's `saved.json` is often too slow/throttled to fetch in that window. So
+the script reads the posts straight from the **page that's already on screen** —
+no network, so it can't time out.
 
-Once it says `done`, the next run starts fresh from your newest saves, so re-run
-anytime to pull in new ones — duplicates are ignored on import.
+1. In **Safari**, open **`https://old.reddit.com/saved?limit=100`** (signed in).
+   That page renders up to 100 of your saved posts.
+2. Tap **Share** → **Export Reddit Saved** → it instantly grabs those ~100 and
+   **auto-advances to the next page**.
+3. **Upload** the saved file into the slideshow. Then just **run the Shortcut
+   again** (you're already on the next page) for the next 100. Repeat until the
+   result says `"done": true`. ~1000 saved = ~10 quick runs.
 
-### Why multiple runs?
-Apple's "Run JavaScript on Web Page" has a **hard ~1–2 second** time limit (their
-docs say a 1s timer is fine but a 5s one "might not complete in time"). Paging
-~1000 saved posts can't finish in that window, so the script grabs a few pages
-per run (within a ~1.5s deadline), saves its place in the page's localStorage,
-and you run it again until `"done": true`. A few hundred saved posts = a couple
-of runs; ~1000 = several. Space runs ~20–30s apart if Reddit starts throttling.
+The slideshow auto-detects the Reddit listing, dedupes, and builds slides.
 
-If you still get **"took too long"**, lower `DEADLINE_MS` at the top of the
-script to `1200`. If every run finishes instantly and you want fewer runs, raise
-it toward `1800`.
+> **Coverage:** the page-read path reliably captures **image & link posts**.
+> Some **v.redd.it videos and galleries** don't carry their media URLs in the
+> page HTML — for those, the GDPR export (or the JSON path below, when Reddit
+> isn't throttling you) is more complete.
+
+### Fallback: JSON fetch
+If you run the Shortcut on a **non-saved** page, it instead fetches
+`saved.json` (100/run, full media incl. galleries/videos) — but that only works
+when Reddit isn't rate-limiting you. If a run returns a "too slow / throttled"
+message, switch to the page-read method above. `DEADLINE_MS` at the top of the
+script tunes the fetch budget (default 2000; the action's ceiling is ~2–3s).
 
 ## Troubleshooting
 
