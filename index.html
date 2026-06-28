@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-24 13:08 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-28 16:13 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -612,11 +612,11 @@ async function getValidToken() {
 async function redditFetch(path) {
   const tok = await getValidToken();
   if (!tok) throw new Error("Not authenticated");
+  // Only `Authorization` here: oauth.reddit.com's CORS preflight allows
+  // `Authorization, Content-Type, X-Reddit-Web-Client` — a custom `X-User-Agent`
+  // header is NOT allowed and makes Safari block the request ("Load failed").
   const res = await fetch("https://oauth.reddit.com" + path, {
-    headers: {
-      "Authorization": `Bearer ${tok.access_token}`,
-      "X-User-Agent": CONFIG.USER_AGENT,
-    },
+    headers: { "Authorization": `Bearer ${tok.access_token}` },
   });
   if (!res.ok) throw new Error(`Reddit API ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return res.json();
