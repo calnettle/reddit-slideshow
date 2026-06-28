@@ -45,13 +45,17 @@ function run() {
     try { for (var j = 0; j < sessionStorage.length && !found; j++) { var k2 = sessionStorage.key(j); scan(sessionStorage.getItem(k2), "sessionStorage:" + k2); } } catch (e) {}
     // 3) known globals
     try { var gs = [window.___r, window.__r, window.__reddit]; for (var x = 0; x < gs.length && !found; x++) { if (gs[x]) scan(JSON.stringify(gs[x]), "global"); } } catch (e) {}
+    // 4) cookies (some new-Reddit setups keep a readable token cookie)
+    try { scan(document.cookie, "cookie"); } catch (e) {}
   } catch (e) {}
 
   var host = (typeof location !== "undefined" && location && location.hostname) || "";
   if (found) {
     out(found); // the result IS the bare token — paste it straight into the app
+  } else if (host === "old.reddit.com") {
+    out({ ok: false, error: "You're on OLD Reddit, which has no token. Open https://sh.reddit.com (new design, signed in) and run it there.", host: host });
   } else {
-    out({ ok: false, error: "No token found here. Open https://www.reddit.com (new design, signed in) and run it there — not old.reddit.com.", host: host });
+    out({ ok: false, error: "No token found on this page. Make sure you're signed in on NEW Reddit — try https://sh.reddit.com — then run it there.", host: host });
   }
 }
 run();
