@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-28 16:13 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-28 16:34 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -78,10 +78,16 @@
       <details style="margin-top:14px">
         <summary class="muted" style="font-size:12px;cursor:pointer">Or paste an access token from another Reddit app</summary>
         <div style="margin-top:8px">
+          <div class="muted" style="font-size:12px;margin-bottom:4px"><strong>Worker proxy URL</strong> (required — Reddit blocks its API from non-Reddit websites):</div>
+          <div class="row">
+            <input id="oauth-proxy-url" type="text" placeholder="https://reddit-oauth.YOURNAME.workers.dev" style="flex:1;min-width:220px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+            <button id="oauth-proxy-save">Save</button>
+          </div>
+          <div class="muted" style="font-size:11px;margin:4px 0 10px">Deploy <code>server/oauth-proxy.js</code> to Cloudflare and paste its URL here. It fetches your saved posts (galleries+videos) from oauth.reddit.com server-side. Without it the browser call is blocked ("Load failed").</div>
           <textarea id="raw-token-input" rows="3" placeholder="eyJhbGc..." style="width:100%;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:11px"></textarea>
           <div class="row" style="margin-top:6px">
             <button id="raw-token-submit">Use this token</button>
-            <span class="muted" style="font-size:12px">Lifetime is decoded from the JWT (usually ~24h). No refresh; re-paste when it expires.</span>
+            <span class="muted" style="font-size:12px">Token lifetime is decoded from the JWT (~1h for a web token). Re-paste a fresh one when it expires.</span>
           </div>
         </div>
       </details>
@@ -402,6 +408,7 @@ const LS = {
   MINSCORES: "rss.minscores",
   SPEED: "rss.arctic_speed",
   HIDDEN: "rss.hidden_subs",
+  OAUTH_PROXY: "rss.oauth_proxy",
 };
 
 /* ============================================================
@@ -612,12 +619,20 @@ async function getValidToken() {
 async function redditFetch(path) {
   const tok = await getValidToken();
   if (!tok) throw new Error("Not authenticated");
-  // Only `Authorization` here: oauth.reddit.com's CORS preflight allows
-  // `Authorization, Content-Type, X-Reddit-Web-Client` — a custom `X-User-Agent`
-  // header is NOT allowed and makes Safari block the request ("Load failed").
-  const res = await fetch("https://oauth.reddit.com" + path, {
-    headers: { "Authorization": `Bearer ${tok.access_token}` },
-  });
+  // Reddit edge-blocks oauth.reddit.com from non-Reddit origins, so when a
+  // Worker proxy URL is set we route through it (server-side fetch, real
+  // User-Agent, no CORS); it forwards the bearer token to oauth.reddit.com.
+  const proxy = (localStorage.getItem(LS.OAUTH_PROXY) || "").replace(/\/+$/, "");
+  let res;
+  if (proxy) {
+    res = await fetch(proxy + "/api?path=" + encodeURIComponent(path), {
+      headers: { "X-Reddit-Token": tok.access_token },
+    });
+  } else {
+    res = await fetch("https://oauth.reddit.com" + path, {
+      headers: { "Authorization": `Bearer ${tok.access_token}` },
+    });
+  }
   if (!res.ok) throw new Error(`Reddit API ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return res.json();
 }
@@ -2911,6 +2926,20 @@ $("#oauth-login-btn").addEventListener("click", startOAuthLogin);
 $("#oauth-logout-btn").addEventListener("click", oauthLogout);
 $("#oauth-fetch-btn").addEventListener("click", oauthFetchAndProcess);
 $("#raw-token-submit").addEventListener("click", injectRawToken);
+
+// OAuth Worker proxy URL (so the app can reach oauth.reddit.com via the Worker).
+$("#oauth-proxy-url").value = localStorage.getItem(LS.OAUTH_PROXY) || "";
+$("#oauth-proxy-save").addEventListener("click", async () => {
+  const v = ($("#oauth-proxy-url").value || "").trim().replace(/\/+$/, "");
+  if (!v) { localStorage.removeItem(LS.OAUTH_PROXY); $("#progress-text").textContent = "Worker proxy cleared."; return; }
+  localStorage.setItem(LS.OAUTH_PROXY, v);
+  $("#progress-text").textContent = "Testing Worker…";
+  try {
+    const r = await fetch(v + "/", { headers: { "Accept": "application/json" } });
+    const j = await r.json().catch(() => ({}));
+    $("#progress-text").textContent = j && j.ok ? `Worker proxy saved and reachable ✓` : `Saved, but the Worker didn't return the expected health response.`;
+  } catch (e) { $("#progress-text").textContent = `Saved, but couldn't reach the Worker: ${e.message}`; }
+});
 
 $("#local-files").addEventListener("change", (e) => {
   if (e.target.files?.length) loadLocalFilesOrZips(e.target.files);
