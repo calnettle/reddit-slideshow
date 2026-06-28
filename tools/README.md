@@ -3,12 +3,44 @@
 Pull your **live saved posts** into the slideshow without the Reddit API app
 (now pre-approval-gated) and without waiting for the monthly GDPR export.
 
-It works by running JavaScript *inside your logged-in Reddit page*, so the
-request to `saved.json` carries your login cookie (same-origin) — no API key, no
-proxy, no CORS. Reddit caps the saved listing at ~1000 most-recent items, so this
-grabs the recent ~1000 + everything new; use the GDPR export for the full history.
+There are two tools here. **Use the Token grabber** — it's the reliable one and
+gets **full media (galleries + videos)**. The page-scraper is a fallback that
+only gets images/links.
 
-## Build the Shortcut (one time, ~2 min)
+---
+
+## ✅ RECOMMENDED — Token grabber (`reddit-token-shortcut.js`)
+
+Your logged-in Reddit session already holds a short-lived OAuth token. This reads
+it out of the page **instantly** (no network → can't hit the ~2s action limit,
+can't be rate-limited). You paste it into the slideshow, and the **app** pulls
+every saved post from `oauth.reddit.com` — the real API: high rate limits, full
+gallery/video media, and no time limit on the app's side.
+
+**Build the Shortcut (one time):**
+1. **Shortcuts** → **+** new.
+2. **ⓘ** → **Show in Share Sheet** ON → **Share Sheet Types** = **Safari web pages**.
+3. Add **"Run JavaScript on Web Page"** → paste all of [`reddit-token-shortcut.js`](reddit-token-shortcut.js).
+4. Add **"Copy to Clipboard"** (so the token is ready to paste). *(Optional: also "Show Result".)*
+5. Name it **Reddit Token**.
+
+**Use it:**
+1. In Safari open **`https://www.reddit.com`** (the **new** design), **signed in**.
+2. Share → **Reddit Token**. The result *is* your token (starts with `eyJ…`); it's now on your clipboard.
+3. In the slideshow → **Option A** → expand **"Or paste an access token"** → paste → **Use this token** → **Fetch saved posts**.
+4. The app pulls all your saved posts (galleries + videos included). Tokens last ~1 hour — if it says expired, grab a fresh one.
+
+> If it returns `{"ok":false,…}` it didn't find a token on that page — make sure
+> you're on **www.reddit.com** (not old.reddit.com) and signed in.
+
+---
+
+## Fallback — page-scraper (`reddit-saved-shortcut.js`)
+
+Only if the token route doesn't work for you. Reads saved posts from the rendered
+`old.reddit.com/saved` page. **Images/links only** — no galleries or videos.
+
+**Build the Shortcut (one time, ~2 min)**
 
 1. **Shortcuts** app → **+** (new shortcut).
 2. Tap the **ⓘ** (settings) → turn ON **Show in Share Sheet** → set **Share Sheet Types** to **Safari web pages** only.
