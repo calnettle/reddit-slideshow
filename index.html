@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-07-18 11:19 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-07-18 11:28 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -117,8 +117,8 @@
     <details style="margin-top:10px">
       <summary class="muted" style="font-size:12px;cursor:pointer"><strong>Worker blocked / rate-limited? Paste the feed instead (always works)</strong></summary>
       <div style="margin-top:8px">
-        <p class="muted" style="font-size:12px;margin:0 0 6px">Reddit rate-limits feed fetches from servers, so the Worker can fail. Fetch the feed from your phone instead — it won't be rate-limited: make a Shortcut with one action, <strong>“Get Contents of URL”</strong> = your saved RSS link, then <strong>“Copy to Clipboard”</strong>. Run it, then paste here.</p>
-        <textarea id="rss-paste" rows="3" placeholder="Paste the RSS feed contents here (starts with <?xml … or <feed …)" style="width:100%;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:11px"></textarea>
+        <p class="muted" style="font-size:12px;margin:0 0 6px">Reddit rate-limits feed fetches from servers, so the Worker can fail. Do this instead — it can't be rate-limited: on the <a href="https://old.reddit.com/prefs/feeds/" target="_blank" rel="noopener">feeds page</a>, open your saved <strong>JSON</strong> link (the button next to RSS) — it shows as <strong>plain text</strong> in Safari. <strong>Select All → Copy</strong>, then paste here. (JSON carries full media directly. RSS also works.)</p>
+        <textarea id="rss-paste" rows="3" placeholder="Paste your saved feed here — JSON (starts with { ) or RSS (starts with <?xml )" style="width:100%;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:11px"></textarea>
         <div class="row" style="margin-top:6px">
           <button id="rss-paste-clip">📋 Paste from clipboard</button>
           <button id="rss-paste-btn" class="primary">Sync from pasted feed</button>
@@ -1620,11 +1620,32 @@ async function syncSavedViaRss(onProgress) {
   return hydrateSavedIds(j.ids || [], onProgress);
 }
 
-// Path 2 (bulletproof): you fetched the feed on your phone (Shortcut → Get Contents
-// of URL, residential IP, no rate-limit/CORS) and pasted it here.
+// Path 2 (bulletproof): you opened your saved feed (JSON or RSS) and pasted it
+// here. If it's the JSON feed we ingest its posts DIRECTLY (full media, current
+// data — no Arctic Shift needed); otherwise we extract ids from the RSS and
+// hydrate via Arctic Shift.
 async function syncSavedFromText(text, onProgress) {
-  const ids = idsFromFeedText(text || "");
-  if (!ids.length) throw new Error("Couldn't find any saved posts in that pasted feed. Make sure you pasted the whole thing (it should mention /comments/… links).");
+  text = (text || "").trim();
+  if (!text) throw new Error("Paste your saved feed first.");
+  // JSON feed → ingest the full post objects directly.
+  if (text[0] === "{" || text[0] === "[") {
+    try {
+      const j = JSON.parse(text);
+      const children = (j && j.data && j.data.children) || j.children || (Array.isArray(j) ? j : null);
+      if (Array.isArray(children) && children.length) {
+        const posts = children.filter(c => c && c.kind === "t3" && c.data).map(c => c.data);
+        if (posts.length) {
+          const found = posts.length; // ingestPostsChunked drains the array
+          onProgress?.(`Found ${found} saved posts in the feed. Building slideshow…`);
+          const res = await ingestPostsChunked(posts, "reddit saved (live)", onProgress);
+          return { found, hydrated: found, added: res.added, total: res.total };
+        }
+      }
+    } catch (e) { /* not valid JSON → fall through to RSS id extraction */ }
+  }
+  // RSS/Atom (or HTML) → pull ids and hydrate from Arctic Shift.
+  const ids = idsFromFeedText(text);
+  if (!ids.length) throw new Error("Couldn't find any saved posts in that pasted feed. Paste the whole thing — the JSON feed (opens as plain text) works best.");
   return hydrateSavedIds(ids, onProgress);
 }
 
