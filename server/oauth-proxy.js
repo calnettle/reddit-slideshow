@@ -1,25 +1,24 @@
 /* ============================================================
- * Reddit OAuth proxy (Cloudflare Worker)
+ * Reddit proxy (Cloudflare Worker) — for the slideshow
  * ------------------------------------------------------------
- * Browsers can't call oauth.reddit.com from a non-Reddit website — Reddit's
- * edge blocks it (the slideshow app sees "Load failed"). This Worker makes that
- * call SERVER-SIDE instead: it forwards
+ * Two routes, both server-side (no browser CORS block, real User-Agent):
  *
- *     GET  https://<worker>/api?path=<url-encoded oauth.reddit.com path>
- *     header  X-Reddit-Token: <your bearer token>
+ * 1) LIVE SAVED via private RSS  (the reliable path — no login, no expiring
+ *    token, no app registration):
+ *      GET  https://<worker>/rss?url=<url-encoded saved.rss URL>
+ *    Fetches your private saved feed (old.reddit.com/user/<you>/saved.rss?feed=
+ *    <token>&user=<you>, enabled at old.reddit.com/prefs/feeds), parses it, and
+ *    returns the post ids. The app then hydrates full gallery/video media from
+ *    Arctic Shift. The feed token is permanent, so this can run on a schedule.
  *
- * to oauth.reddit.com with the bearer token + a real User-Agent, and returns the
- * response with permissive CORS so the app can read it. No time limit, no browser
- * block, full gallery/video media. The app paginates by calling this per page.
+ * 2) OAuth passthrough (only if you have a bearer token):
+ *      GET  https://<worker>/api?path=<oauth path>   header X-Reddit-Token: <tok>
  *
- * Deploy:
- *   cd server
- *   wrangler deploy oauth-proxy.js --name reddit-oauth
- *   → paste the printed URL into the app (Option A → Worker proxy URL).
- * Or in the dashboard: new Worker, paste this file, deploy. No KV/secret needed.
+ * Deploy:  cd server && wrangler deploy oauth-proxy.js --name reddit-oauth
+ *   → paste the printed URL into the app.  No KV/secret needed.
  * ============================================================ */
 
-const UA = "web:calnetcorp-reddit-slideshow:1.0 (saved exporter)";
+const UA = "web:calnetcorp-reddit-slideshow:1.1 (saved slideshow)";
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,OPTIONS",
@@ -29,36 +28,60 @@ const CORS = {
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), { status, headers: { ...CORS, "Content-Type": "application/json" } });
 
+// Pull t3 post ids out of a Reddit RSS/Atom feed (from permalinks + bare t3_ ids).
+function idsFromFeed(xml) {
+  const ids = [], seen = {};
+  const add = (raw) => { const id = "t3_" + String(raw).toLowerCase(); if (!seen[id]) { seen[id] = 1; ids.push(id); } };
+  let m;
+  const rePerma = /\/comments\/([a-z0-9]+)[\/"?]/gi;
+  while ((m = rePerma.exec(xml))) add(m[1]);
+  const reT3 = /\bt3_([a-z0-9]+)\b/gi;
+  while ((m = reT3.exec(xml))) add(m[1]);
+  return ids;
+}
+
 export default {
   async fetch(req) {
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     const url = new URL(req.url);
     const route = url.pathname.replace(/\/+$/, "") || "/";
 
-    if (route === "/") return json({ ok: true, service: "reddit-slideshow oauth proxy" });
-    if (route !== "/api") return json({ error: "not found" }, 404);
+    if (route === "/") return json({ ok: true, service: "reddit-slideshow proxy", routes: ["/rss", "/api"] });
 
-    const token = req.headers.get("X-Reddit-Token");
-    if (!token) return json({ error: "missing X-Reddit-Token header" }, 400);
-
-    // The full oauth.reddit.com path (incl. its own query string) arrives
-    // url-encoded in ?path= ; default to /api/v1/me.
-    let path = url.searchParams.get("path") || "/api/v1/me";
-    if (!path.startsWith("/")) path = "/" + path;
-
-    try {
-      const r = await fetch("https://oauth.reddit.com" + path, {
-        headers: { "Authorization": "Bearer " + token, "User-Agent": UA, "Accept": "application/json" },
-      });
-      const body = await r.text();
-      // Pass Reddit's status + body straight through (with CORS) so the app can
-      // surface 401/403/etc. instead of an opaque failure.
-      return new Response(body, {
-        status: r.status,
-        headers: { ...CORS, "Content-Type": r.headers.get("content-type") || "application/json" },
-      });
-    } catch (e) {
-      return json({ error: "proxy fetch failed: " + String((e && e.message) || e) }, 502);
+    // --- LIVE SAVED via private RSS feed ---
+    if (route === "/rss") {
+      const feed = url.searchParams.get("url") || "";
+      let host = "";
+      try { host = new URL(feed).hostname; } catch (e) { return json({ error: "bad or missing ?url=" }, 400); }
+      if (!/(^|\.)reddit\.com$/i.test(host)) return json({ error: "only reddit.com feed URLs are allowed" }, 400);
+      try {
+        const r = await fetch(feed, { headers: { "User-Agent": UA, "Accept": "application/atom+xml, application/rss+xml, text/xml, */*" } });
+        const body = await r.text();
+        if (!r.ok) return json({ error: "feed returned HTTP " + r.status + " (check the token, or reset it at old.reddit.com/prefs/feeds)", status: r.status }, 502);
+        const ids = idsFromFeed(body);
+        return json({ ok: true, count: ids.length, ids });
+      } catch (e) {
+        return json({ error: "feed fetch failed: " + String((e && e.message) || e) }, 502);
+      }
     }
+
+    // --- OAuth passthrough (optional) ---
+    if (route === "/api") {
+      const token = req.headers.get("X-Reddit-Token");
+      if (!token) return json({ error: "missing X-Reddit-Token header" }, 400);
+      let path = url.searchParams.get("path") || "/api/v1/me";
+      if (!path.startsWith("/")) path = "/" + path;
+      try {
+        const r = await fetch("https://oauth.reddit.com" + path, {
+          headers: { "Authorization": "Bearer " + token, "User-Agent": UA, "Accept": "application/json" },
+        });
+        const body = await r.text();
+        return new Response(body, { status: r.status, headers: { ...CORS, "Content-Type": r.headers.get("content-type") || "application/json" } });
+      } catch (e) {
+        return json({ error: "proxy fetch failed: " + String((e && e.message) || e) }, 502);
+      }
+    }
+
+    return json({ error: "not found" }, 404);
   },
 };

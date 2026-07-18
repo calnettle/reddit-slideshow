@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-06-28 16:34 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-07-18 10:54 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -100,6 +100,21 @@
         <button id="oauth-logout-btn">Sign out</button>
       </div>
     </div>
+  </div>
+
+  <div id="rss-panel" class="panel">
+    <strong>⭐ Live saved posts (private RSS — recommended):</strong>
+    <p class="muted" style="font-size:12px;margin:6px 0">Pulls your <strong>saved posts with full galleries + videos</strong> using Reddit's private RSS feed — no login, no expiring token, no app registration. Run it anytime to fetch new saves (deduped). Reddit's feed returns your <em>recent</em> saves (~25); for the full back-catalogue use the GDPR export (Option&nbsp;B) once, then keep it current here.</p>
+    <ol class="muted" style="font-size:12px;margin:6px 0 8px;padding-left:20px">
+      <li>Deploy <code>server/oauth-proxy.js</code> to Cloudflare and paste its URL into <strong>Option A → Worker proxy URL</strong> (used here too).</li>
+      <li>At <a href="https://old.reddit.com/prefs/feeds/" target="_blank" rel="noopener">old.reddit.com/prefs/feeds</a> turn on <strong>“enable private RSS feeds”</strong>, then copy your <strong>saved</strong> feed link and paste it below. (Treat it like a password.)</li>
+    </ol>
+    <div class="row">
+      <input id="rss-url" type="text" placeholder="https://old.reddit.com/user/<you>/saved.rss?feed=…&user=<you>" style="flex:1;min-width:240px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+      <button id="rss-save">Save</button>
+      <button id="rss-sync-btn" class="primary">Sync saved</button>
+    </div>
+    <div id="rss-progress" class="muted" style="font-size:12px;margin-top:8px"></div>
   </div>
 
   <div id="upload-panel" class="panel">
@@ -409,6 +424,7 @@ const LS = {
   SPEED: "rss.arctic_speed",
   HIDDEN: "rss.hidden_subs",
   OAUTH_PROXY: "rss.oauth_proxy",
+  SAVED_RSS: "rss.saved_rss_url",
 };
 
 /* ============================================================
@@ -1526,6 +1542,56 @@ async function arcticSearch(query, subRaw, sort, time, limit, onProgress) {
     : await arcticFeed({ subreddit: sub || undefined, title: q, after }, limit, (n, p) => onProgress?.(`Found ${n} posts (page ${p})…`));
   if (!posts.length) throw new Error(`No posts matched "${q}"${sub ? ` in r/${sub}` : ""} on Arctic Shift. Try a broader term or widen the dates.`);
   return ingestPostsChunked(posts, label, onProgress);
+}
+
+/* ============================================================
+ * Live SAVED posts via private RSS feed + Arctic Shift hydration
+ * ------------------------------------------------------------
+ * Reddit's private saved RSS feed (old.reddit.com/user/<you>/saved.rss?feed=
+ * <token>&user=<you>, enabled at old.reddit.com/prefs/feeds) uses a PERMANENT
+ * token — no login, no expiring OAuth token, no app registration. The Worker
+ * fetches it server-side and returns the saved post ids; we then hydrate each
+ * one's full media (galleries + videos) from Arctic Shift and build slides.
+ * Run it anytime to pull in new saves (deduped) — a real live updater.
+ * ============================================================ */
+
+// Batch-look up full post objects by id from Arctic Shift (CORS-open, no auth).
+async function arcticFetchIds(ids) {
+  const url = "https://arctic-shift.photon-reddit.com/api/posts/ids?ids=" + ids.join(",");
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await fetch(url, { headers: { "Accept": "application/json" } });
+      if (!r.ok) { if (attempt === 3) return []; await new Promise(z => setTimeout(z, 500 * attempt)); continue; }
+      const j = await r.json();
+      return Array.isArray(j.data) ? j.data.filter(Boolean) : [];
+    } catch (e) { if (attempt === 3) return []; await new Promise(z => setTimeout(z, 500 * attempt)); }
+  }
+  return [];
+}
+
+async function syncSavedViaRss(onProgress) {
+  const proxy = (localStorage.getItem(LS.OAUTH_PROXY) || "").replace(/\/+$/, "");
+  const rss = (localStorage.getItem(LS.SAVED_RSS) || "").trim();
+  if (!proxy) throw new Error("Set your Worker URL first (Option A → Worker proxy URL).");
+  if (!rss) throw new Error("Paste your saved RSS feed URL first.");
+  onProgress?.("Fetching your saved feed…");
+  const r = await fetch(proxy + "/rss?url=" + encodeURIComponent(rss));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || `Feed fetch failed (HTTP ${r.status}).`);
+  const ids = j.ids || [];
+  if (!ids.length) throw new Error("No saved posts found in that feed. Check the RSS URL/token (reset it at old.reddit.com/prefs/feeds if needed).");
+
+  onProgress?.(`Found ${ids.length} saved posts. Fetching full media…`);
+  const posts = [];
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = await arcticFetchIds(ids.slice(i, i + 50));
+    for (const p of chunk) posts.push(p);
+    onProgress?.(`Fetched media for ${posts.length} / ${ids.length}…`);
+  }
+  if (!posts.length) throw new Error(`Found ${ids.length} saved posts but Arctic Shift had no media data for them (very new posts can lag). Try again shortly.`);
+  const hydrated = posts.length; // ingestPostsChunked drains the array, so capture first
+  const res = await ingestPostsChunked(posts, "reddit saved (live)", onProgress);
+  return { found: ids.length, hydrated, added: res.added, total: res.total };
 }
 
 async function loadFromHTML(file) {
@@ -2939,6 +3005,31 @@ $("#oauth-proxy-save").addEventListener("click", async () => {
     const j = await r.json().catch(() => ({}));
     $("#progress-text").textContent = j && j.ok ? `Worker proxy saved and reachable ✓` : `Saved, but the Worker didn't return the expected health response.`;
   } catch (e) { $("#progress-text").textContent = `Saved, but couldn't reach the Worker: ${e.message}`; }
+});
+
+// Live saved posts via private RSS feed.
+$("#rss-url").value = localStorage.getItem(LS.SAVED_RSS) || "";
+$("#rss-save").addEventListener("click", () => {
+  const v = ($("#rss-url").value || "").trim();
+  if (v) { localStorage.setItem(LS.SAVED_RSS, v); $("#rss-progress").textContent = "Saved RSS feed URL ✓"; }
+  else { localStorage.removeItem(LS.SAVED_RSS); $("#rss-progress").textContent = "RSS feed URL cleared."; }
+});
+$("#rss-sync-btn").addEventListener("click", async () => {
+  const v = ($("#rss-url").value || "").trim();
+  if (v) localStorage.setItem(LS.SAVED_RSS, v);
+  $("#rss-sync-btn").disabled = true;
+  $("#errors").innerHTML = "";
+  $("#data-panel").style.display = "block";
+  try {
+    const r = await syncSavedViaRss((msg) => { $("#rss-progress").textContent = msg; });
+    $("#rss-progress").textContent = `Synced ${r.found} saved posts → added ${r.added} new slide(s) (${r.total} total). Press “Start slideshow”.`;
+    renderCacheInfo();
+  } catch (e) {
+    showError(e.message);
+    $("#rss-progress").textContent = e.message;
+  } finally {
+    $("#rss-sync-btn").disabled = false;
+  }
 });
 
 $("#local-files").addEventListener("change", (e) => {
