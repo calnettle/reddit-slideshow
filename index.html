@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-07-18 11:28 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-07-18 11:48 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -122,6 +122,14 @@
         <div class="row" style="margin-top:6px">
           <button id="rss-paste-clip">📋 Paste from clipboard</button>
           <button id="rss-paste-btn" class="primary">Sync from pasted feed</button>
+        </div>
+        <div id="rss-next" style="display:none;margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
+          <div class="muted" style="font-size:12px;margin-bottom:4px"><strong>Next 100 →</strong> open this link, Select All → Copy, then paste + Sync again:</div>
+          <input id="rss-next-url" type="text" readonly style="width:100%;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:11px">
+          <div class="row" style="margin-top:6px">
+            <button id="rss-next-open">Open next page</button>
+            <button id="rss-next-copy">📋 Copy next URL</button>
+          </div>
         </div>
       </div>
     </details>
@@ -1636,9 +1644,11 @@ async function syncSavedFromText(text, onProgress) {
         const posts = children.filter(c => c && c.kind === "t3" && c.data).map(c => c.data);
         if (posts.length) {
           const found = posts.length; // ingestPostsChunked drains the array
+          const last = posts[posts.length - 1];
+          const after = (j && j.data && j.data.after) || (last && last.name) || null;
           onProgress?.(`Found ${found} saved posts in the feed. Building slideshow…`);
           const res = await ingestPostsChunked(posts, "reddit saved (live)", onProgress);
-          return { found, hydrated: found, added: res.added, total: res.total };
+          return { found, hydrated: found, added: res.added, total: res.total, after };
         }
       }
     } catch (e) { /* not valid JSON → fall through to RSS id extraction */ }
@@ -1646,7 +1656,23 @@ async function syncSavedFromText(text, onProgress) {
   // RSS/Atom (or HTML) → pull ids and hydrate from Arctic Shift.
   const ids = idsFromFeedText(text);
   if (!ids.length) throw new Error("Couldn't find any saved posts in that pasted feed. Paste the whole thing — the JSON feed (opens as plain text) works best.");
-  return hydrateSavedIds(ids, onProgress);
+  const after = ids[ids.length - 1] || null; // oldest id in this page → cursor for the next
+  const res = await hydrateSavedIds(ids, onProgress);
+  return { ...res, after };
+}
+
+// Build the URL to open for the NEXT 100 saved posts, from the saved feed URL
+// + the cursor of the page just synced.
+function buildNextFeedUrl(after, count) {
+  const base = (localStorage.getItem(LS.SAVED_RSS) || ($("#rss-url") && $("#rss-url").value) || "").trim();
+  if (!base || !after) return null;
+  try {
+    const u = new URL(base);
+    u.searchParams.set("limit", "100");
+    if (count) u.searchParams.set("count", String(count));
+    u.searchParams.set("after", after);
+    return u.toString();
+  } catch (e) { return null; }
 }
 
 async function loadFromHTML(file) {
@@ -3066,8 +3092,9 @@ $("#oauth-proxy-save").addEventListener("click", async () => {
 $("#rss-url").value = localStorage.getItem(LS.SAVED_RSS) || "";
 $("#rss-save").addEventListener("click", () => {
   const v = ($("#rss-url").value || "").trim();
-  if (v) { localStorage.setItem(LS.SAVED_RSS, v); $("#rss-progress").textContent = "Saved RSS feed URL ✓"; }
-  else { localStorage.removeItem(LS.SAVED_RSS); $("#rss-progress").textContent = "RSS feed URL cleared."; }
+  window.__rssSeen = 0; $("#rss-next").style.display = "none"; // new feed → restart pagination
+  if (v) { localStorage.setItem(LS.SAVED_RSS, v); $("#rss-progress").textContent = "Saved feed URL ✓"; }
+  else { localStorage.removeItem(LS.SAVED_RSS); $("#rss-progress").textContent = "Feed URL cleared."; }
 });
 async function runRssSync(fn, btn) {
   btn.disabled = true;
@@ -3077,6 +3104,10 @@ async function runRssSync(fn, btn) {
     const r = await fn((msg) => { $("#rss-progress").textContent = msg; });
     $("#rss-progress").textContent = `Synced ${r.found} saved posts → added ${r.added} new slide(s) (${r.total} total). Press “Start slideshow”.`;
     renderCacheInfo();
+    // Offer the next page's URL when the pasted feed had a cursor.
+    window.__rssSeen = (window.__rssSeen || 0) + (r.found || 0);
+    const nextUrl = r.after ? buildNextFeedUrl(r.after, window.__rssSeen) : null;
+    if (nextUrl) { $("#rss-next-url").value = nextUrl; $("#rss-next").style.display = "block"; }
   } catch (e) {
     showError(e.message);
     $("#rss-progress").textContent = e.message;
@@ -3084,6 +3115,12 @@ async function runRssSync(fn, btn) {
     btn.disabled = false;
   }
 }
+$("#rss-next-copy").addEventListener("click", async () => {
+  const v = $("#rss-next-url").value;
+  try { await navigator.clipboard.writeText(v); $("#rss-progress").textContent = "Next URL copied. Open it → Select All → Copy → paste + Sync."; }
+  catch (e) { $("#rss-next-url").focus(); $("#rss-next-url").select(); $("#rss-progress").textContent = "Select the URL above and copy it."; }
+});
+$("#rss-next-open").addEventListener("click", () => { const v = $("#rss-next-url").value; if (v) window.open(v, "_blank"); });
 $("#rss-sync-btn").addEventListener("click", () => {
   const v = ($("#rss-url").value || "").trim();
   if (v) localStorage.setItem(LS.SAVED_RSS, v);
