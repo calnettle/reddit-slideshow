@@ -27,6 +27,7 @@ const CORS = {
 };
 const json = (obj, status = 200) =>
   new Response(JSON.stringify(obj), { status, headers: { ...CORS, "Content-Type": "application/json" } });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Pull t3 post ids out of a Reddit RSS/Atom feed (from permalinks + bare t3_ ids).
 function idsFromFeed(xml) {
@@ -54,15 +55,26 @@ export default {
       let host = "";
       try { host = new URL(feed).hostname; } catch (e) { return json({ error: "bad or missing ?url=" }, 400); }
       if (!/(^|\.)reddit\.com$/i.test(host)) return json({ error: "only reddit.com feed URLs are allowed" }, 400);
-      try {
-        const r = await fetch(feed, { headers: { "User-Agent": UA, "Accept": "application/atom+xml, application/rss+xml, text/xml, */*" } });
-        const body = await r.text();
-        if (!r.ok) return json({ error: "feed returned HTTP " + r.status + " (check the token, or reset it at old.reddit.com/prefs/feeds)", status: r.status }, 502);
-        const ids = idsFromFeed(body);
-        return json({ ok: true, count: ids.length, ids });
-      } catch (e) {
-        return json({ error: "feed fetch failed: " + String((e && e.message) || e) }, 502);
+      // Reddit rate-limits RSS from server IPs to ~1 request / few seconds (429 +
+      // empty body). The Worker has no time limit, so wait for the reset and retry.
+      let lastStatus = 0, lastLen = 0;
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        try {
+          const r = await fetch(feed, { headers: { "User-Agent": UA, "Accept": "application/atom+xml, application/rss+xml, text/xml, application/json, */*" } });
+          const body = await r.text();
+          lastStatus = r.status; lastLen = body.length;
+          if (r.ok && body.length > 100) {
+            const ids = idsFromFeed(body);
+            return json({ ok: true, count: ids.length, ids, redditStatus: r.status });
+          }
+          if ((r.status === 429 || body.length <= 100) && attempt < 5) { await sleep(3500); continue; } // rate-limited → wait + retry
+          return json({ error: "feed returned HTTP " + r.status + (body.length === 0 ? " with an empty body (Reddit rate-limited the server). Try Sync again." : " — check the feed URL/token (reset it at old.reddit.com/prefs/feeds)."), redditStatus: r.status, bodyLen: body.length }, 502);
+        } catch (e) {
+          if (attempt < 5) { await sleep(2500); continue; }
+          return json({ error: "feed fetch failed: " + String((e && e.message) || e) }, 502);
+        }
       }
+      return json({ error: "Reddit kept rate-limiting the feed after retries — wait a minute and Sync again.", redditStatus: lastStatus, bodyLen: lastLen }, 502);
     }
 
     // --- OAuth passthrough (optional) ---
