@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-07-18 10:54 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-07-18 11:19 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -110,10 +110,21 @@
       <li>At <a href="https://old.reddit.com/prefs/feeds/" target="_blank" rel="noopener">old.reddit.com/prefs/feeds</a> turn on <strong>“enable private RSS feeds”</strong>, then copy your <strong>saved</strong> feed link and paste it below. (Treat it like a password.)</li>
     </ol>
     <div class="row">
-      <input id="rss-url" type="text" placeholder="https://old.reddit.com/user/<you>/saved.rss?feed=…&user=<you>" style="flex:1;min-width:240px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+      <input id="rss-url" type="text" placeholder="https://old.reddit.com/saved.rss?feed=…&user=<you>" style="flex:1;min-width:240px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
       <button id="rss-save">Save</button>
-      <button id="rss-sync-btn" class="primary">Sync saved</button>
+      <button id="rss-sync-btn" class="primary">Sync via Worker</button>
     </div>
+    <details style="margin-top:10px">
+      <summary class="muted" style="font-size:12px;cursor:pointer"><strong>Worker blocked / rate-limited? Paste the feed instead (always works)</strong></summary>
+      <div style="margin-top:8px">
+        <p class="muted" style="font-size:12px;margin:0 0 6px">Reddit rate-limits feed fetches from servers, so the Worker can fail. Fetch the feed from your phone instead — it won't be rate-limited: make a Shortcut with one action, <strong>“Get Contents of URL”</strong> = your saved RSS link, then <strong>“Copy to Clipboard”</strong>. Run it, then paste here.</p>
+        <textarea id="rss-paste" rows="3" placeholder="Paste the RSS feed contents here (starts with <?xml … or <feed …)" style="width:100%;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:11px"></textarea>
+        <div class="row" style="margin-top:6px">
+          <button id="rss-paste-clip">📋 Paste from clipboard</button>
+          <button id="rss-paste-btn" class="primary">Sync from pasted feed</button>
+        </div>
+      </div>
+    </details>
     <div id="rss-progress" class="muted" style="font-size:12px;margin-top:8px"></div>
   </div>
 
@@ -1569,18 +1580,20 @@ async function arcticFetchIds(ids) {
   return [];
 }
 
-async function syncSavedViaRss(onProgress) {
-  const proxy = (localStorage.getItem(LS.OAUTH_PROXY) || "").replace(/\/+$/, "");
-  const rss = (localStorage.getItem(LS.SAVED_RSS) || "").trim();
-  if (!proxy) throw new Error("Set your Worker URL first (Option A → Worker proxy URL).");
-  if (!rss) throw new Error("Paste your saved RSS feed URL first.");
-  onProgress?.("Fetching your saved feed…");
-  const r = await fetch(proxy + "/rss?url=" + encodeURIComponent(rss));
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || j.error) throw new Error(j.error || `Feed fetch failed (HTTP ${r.status}).`);
-  const ids = j.ids || [];
-  if (!ids.length) throw new Error("No saved posts found in that feed. Check the RSS URL/token (reset it at old.reddit.com/prefs/feeds if needed).");
+// Extract t3 post ids from raw RSS/Atom/JSON feed text (client-side twin of the
+// Worker's idsFromFeed — used for the "paste feed" path).
+function idsFromFeedText(text) {
+  const ids = [], seen = {};
+  const add = (raw) => { const id = "t3_" + String(raw).toLowerCase(); if (!seen[id]) { seen[id] = 1; ids.push(id); } };
+  let m;
+  const re1 = /\/comments\/([a-z0-9]+)[\/"?]/gi; while ((m = re1.exec(text))) add(m[1]);
+  const re2 = /\bt3_([a-z0-9]+)\b/gi; while ((m = re2.exec(text))) add(m[1]);
+  return ids;
+}
 
+// Given saved-post ids, hydrate full media from Arctic Shift and ingest.
+async function hydrateSavedIds(ids, onProgress) {
+  if (!ids.length) throw new Error("No saved posts found in that feed. Check the feed URL/token (reset it at old.reddit.com/prefs/feeds if needed).");
   onProgress?.(`Found ${ids.length} saved posts. Fetching full media…`);
   const posts = [];
   for (let i = 0; i < ids.length; i += 50) {
@@ -1588,10 +1601,31 @@ async function syncSavedViaRss(onProgress) {
     for (const p of chunk) posts.push(p);
     onProgress?.(`Fetched media for ${posts.length} / ${ids.length}…`);
   }
-  if (!posts.length) throw new Error(`Found ${ids.length} saved posts but Arctic Shift had no media data for them (very new posts can lag). Try again shortly.`);
+  if (!posts.length) throw new Error(`Found ${ids.length} saved posts but Arctic Shift had no media data for them yet (very new posts can lag). Try again shortly.`);
   const hydrated = posts.length; // ingestPostsChunked drains the array, so capture first
   const res = await ingestPostsChunked(posts, "reddit saved (live)", onProgress);
   return { found: ids.length, hydrated, added: res.added, total: res.total };
+}
+
+// Path 1: the Worker fetches the feed server-side (may be rate-limited on shared IPs).
+async function syncSavedViaRss(onProgress) {
+  const proxy = (localStorage.getItem(LS.OAUTH_PROXY) || "").replace(/\/+$/, "");
+  const rss = (localStorage.getItem(LS.SAVED_RSS) || "").trim();
+  if (!proxy) throw new Error("Set your Worker URL first (Option A → Worker proxy URL).");
+  if (!rss) throw new Error("Paste your saved RSS feed URL first.");
+  onProgress?.("Fetching your saved feed via the Worker…");
+  const r = await fetch(proxy + "/rss?url=" + encodeURIComponent(rss));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(j.error || `Feed fetch failed (HTTP ${r.status}).`);
+  return hydrateSavedIds(j.ids || [], onProgress);
+}
+
+// Path 2 (bulletproof): you fetched the feed on your phone (Shortcut → Get Contents
+// of URL, residential IP, no rate-limit/CORS) and pasted it here.
+async function syncSavedFromText(text, onProgress) {
+  const ids = idsFromFeedText(text || "");
+  if (!ids.length) throw new Error("Couldn't find any saved posts in that pasted feed. Make sure you pasted the whole thing (it should mention /comments/… links).");
+  return hydrateSavedIds(ids, onProgress);
 }
 
 async function loadFromHTML(file) {
@@ -3014,22 +3048,36 @@ $("#rss-save").addEventListener("click", () => {
   if (v) { localStorage.setItem(LS.SAVED_RSS, v); $("#rss-progress").textContent = "Saved RSS feed URL ✓"; }
   else { localStorage.removeItem(LS.SAVED_RSS); $("#rss-progress").textContent = "RSS feed URL cleared."; }
 });
-$("#rss-sync-btn").addEventListener("click", async () => {
-  const v = ($("#rss-url").value || "").trim();
-  if (v) localStorage.setItem(LS.SAVED_RSS, v);
-  $("#rss-sync-btn").disabled = true;
+async function runRssSync(fn, btn) {
+  btn.disabled = true;
   $("#errors").innerHTML = "";
   $("#data-panel").style.display = "block";
   try {
-    const r = await syncSavedViaRss((msg) => { $("#rss-progress").textContent = msg; });
+    const r = await fn((msg) => { $("#rss-progress").textContent = msg; });
     $("#rss-progress").textContent = `Synced ${r.found} saved posts → added ${r.added} new slide(s) (${r.total} total). Press “Start slideshow”.`;
     renderCacheInfo();
   } catch (e) {
     showError(e.message);
     $("#rss-progress").textContent = e.message;
   } finally {
-    $("#rss-sync-btn").disabled = false;
+    btn.disabled = false;
   }
+}
+$("#rss-sync-btn").addEventListener("click", () => {
+  const v = ($("#rss-url").value || "").trim();
+  if (v) localStorage.setItem(LS.SAVED_RSS, v);
+  runRssSync(syncSavedViaRss, $("#rss-sync-btn"));
+});
+$("#rss-paste-btn").addEventListener("click", () => {
+  const text = $("#rss-paste").value || "";
+  runRssSync((p) => syncSavedFromText(text, p), $("#rss-paste-btn"));
+});
+$("#rss-paste-clip").addEventListener("click", async () => {
+  try {
+    const t = (await navigator.clipboard.readText()) || "";
+    $("#rss-paste").value = t;
+    $("#rss-progress").textContent = t ? "Pasted from clipboard — now tap “Sync from pasted feed”." : "Clipboard was empty.";
+  } catch (e) { $("#rss-progress").textContent = "Couldn't read clipboard — long-press the box and Paste manually."; }
 });
 
 $("#local-files").addEventListener("change", (e) => {
