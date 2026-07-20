@@ -64,7 +64,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-07-18 11:48 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-07-20 12:47 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -103,22 +103,24 @@
   </div>
 
   <div id="rss-panel" class="panel">
-    <strong>⭐ Live saved posts (private RSS — recommended):</strong>
-    <p class="muted" style="font-size:12px;margin:6px 0">Pulls your <strong>saved posts with full galleries + videos</strong> using Reddit's private RSS feed — no login, no expiring token, no app registration. Run it anytime to fetch new saves (deduped). Reddit's feed returns your <em>recent</em> saves (~25); for the full back-catalogue use the GDPR export (Option&nbsp;B) once, then keep it current here.</p>
+    <strong>⭐ Live saved posts (private feed — recommended):</strong>
+    <p class="muted" style="font-size:12px;margin:6px 0">Pulls your <strong>saved posts with full galleries + videos</strong> using Reddit's private <strong>JSON</strong> feed — no login, no expiring token, no app registration. Run it anytime to fetch new saves (deduped). Use the paste method below (it can't be rate-limited); for your full back-catalogue page through with the “Next 100” link, or use the GDPR export (Option&nbsp;B) once.</p>
     <ol class="muted" style="font-size:12px;margin:6px 0 8px;padding-left:20px">
-      <li>Deploy <code>server/oauth-proxy.js</code> to Cloudflare and paste its URL into <strong>Option A → Worker proxy URL</strong> (used here too).</li>
-      <li>At <a href="https://old.reddit.com/prefs/feeds/" target="_blank" rel="noopener">old.reddit.com/prefs/feeds</a> turn on <strong>“enable private RSS feeds”</strong>, then copy your <strong>saved</strong> feed link and paste it below. (Treat it like a password.)</li>
+      <li>At <a href="https://old.reddit.com/prefs/feeds/" target="_blank" rel="noopener">old.reddit.com/prefs/feeds</a> turn on <strong>“enable private RSS feeds”</strong>, then <strong>right-click the JSON button</strong> next to “your saved links” → Copy Link. Add <code>&amp;limit=100</code> to the end. Paste that URL below → Save.</li>
+      <li>Open the JSON URL in Safari (shows as plain text) → Select All → Copy → paste it in the <strong>“Paste the feed”</strong> box below → <strong>Sync</strong>.</li>
     </ol>
     <div class="row">
-      <input id="rss-url" type="text" placeholder="https://old.reddit.com/saved.rss?feed=…&user=<you>" style="flex:1;min-width:240px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+      <label for="rss-url" class="muted" style="font-size:12px">Feed URL:</label>
+      <input id="rss-url" type="text" placeholder="https://old.reddit.com/saved.json?feed=…&user=<you>&limit=100" style="flex:1;min-width:240px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
       <button id="rss-save">Save</button>
-      <button id="rss-sync-btn" class="primary">Sync via Worker</button>
     </div>
-    <details style="margin-top:10px">
-      <summary class="muted" style="font-size:12px;cursor:pointer"><strong>Worker blocked / rate-limited? Paste the feed instead (always works)</strong></summary>
+    <div class="muted" style="font-size:11px;margin-top:2px">Your JSON feed URL — the app uses it to build the “Next 100” link. (The <strong>Sync via Worker</strong> button below is optional and often rate-limited; the paste method is the reliable one.)</div>
+    <div class="row" style="margin-top:6px"><button id="rss-sync-btn">Sync via Worker (optional)</button></div>
+    <details open style="margin-top:10px">
+      <summary style="font-size:13px;cursor:pointer"><strong>Paste the feed (reliable method)</strong></summary>
       <div style="margin-top:8px">
-        <p class="muted" style="font-size:12px;margin:0 0 6px">Reddit rate-limits feed fetches from servers, so the Worker can fail. Do this instead — it can't be rate-limited: on the <a href="https://old.reddit.com/prefs/feeds/" target="_blank" rel="noopener">feeds page</a>, open your saved <strong>JSON</strong> link (the button next to RSS) — it shows as <strong>plain text</strong> in Safari. <strong>Select All → Copy</strong>, then paste here. (JSON carries full media directly. RSS also works.)</p>
-        <textarea id="rss-paste" rows="3" placeholder="Paste your saved feed here — JSON (starts with { ) or RSS (starts with <?xml )" style="width:100%;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:11px"></textarea>
+        <p class="muted" style="font-size:12px;margin:0 0 6px">Open your saved <strong>JSON</strong> feed URL in Safari (it shows as <strong>plain text</strong>) → <strong>Select All → Copy</strong> → paste here → Sync. JSON carries full galleries/videos directly. (RSS also works.)</p>
+        <textarea id="rss-paste" rows="3" placeholder="Paste your saved JSON feed here (starts with { )" style="width:100%;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-family:ui-monospace,monospace;font-size:11px"></textarea>
         <div class="row" style="margin-top:6px">
           <button id="rss-paste-clip">📋 Paste from clipboard</button>
           <button id="rss-paste-btn" class="primary">Sync from pasted feed</button>
@@ -1664,10 +1666,12 @@ async function syncSavedFromText(text, onProgress) {
 // Build the URL to open for the NEXT 100 saved posts, from the saved feed URL
 // + the cursor of the page just synced.
 function buildNextFeedUrl(after, count) {
-  const base = (localStorage.getItem(LS.SAVED_RSS) || ($("#rss-url") && $("#rss-url").value) || "").trim();
+  // Prefer what's in the field (current) over a possibly-stale saved value.
+  const base = ((($("#rss-url") && $("#rss-url").value) || localStorage.getItem(LS.SAVED_RSS)) || "").trim();
   if (!base || !after) return null;
   try {
     const u = new URL(base);
+    u.pathname = u.pathname.replace(/\.rss$/i, ".json"); // paginate as JSON (plain text in Safari + full media)
     u.searchParams.set("limit", "100");
     if (count) u.searchParams.set("count", String(count));
     u.searchParams.set("after", after);
