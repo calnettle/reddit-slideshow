@@ -83,7 +83,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-08-10 15:13 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-08-10 15:29 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -473,10 +473,26 @@
 
     <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
       <label style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="metro-drift"> <strong>Random drift</strong> — speed up or slow down on a timer</label>
+      <div class="row" id="metro-drift-opts" hidden style="margin-top:8px">
+        <label style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="metro-drift-glide"> Glide smoothly into the new tempo</label>
+        <label style="display:inline-flex;align-items:center;gap:6px;margin-left:12px"><input type="checkbox" id="metro-drift-scale"> Change sooner at fast tempos</label>
+      </div>
       <div class="metro-grid" id="metro-drift-fields" hidden>
-        <div class="metro-field">
+        <div class="metro-field" id="metro-drift-every-field">
           <label for="metro-drift-every">Change every (seconds)</label>
           <input id="metro-drift-every" type="number" min="1" max="3600" step="1" value="30">
+        </div>
+        <div class="metro-field drift-scale-field" hidden>
+          <label for="metro-drift-fast-bpm">Fast tempo starts at (BPM)</label>
+          <input id="metro-drift-fast-bpm" type="number" min="30" max="300" step="1" value="160">
+        </div>
+        <div class="metro-field drift-scale-field" hidden>
+          <label for="metro-drift-fast-every">At or above, change every (s)</label>
+          <input id="metro-drift-fast-every" type="number" min="1" max="3600" step="1" value="10">
+        </div>
+        <div class="metro-field drift-scale-field" hidden>
+          <label for="metro-drift-slow-every">Below that, change every (s)</label>
+          <input id="metro-drift-slow-every" type="number" min="1" max="3600" step="1" value="30">
         </div>
         <div class="metro-field">
           <label for="metro-drift-amount">Change by up to (± BPM)</label>
@@ -492,7 +508,7 @@
         </div>
       </div>
       <div class="row" id="metro-drift-extra" hidden style="margin-top:10px">
-        <label style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="metro-drift-glide"> Glide smoothly into the new tempo</label>
+        <span id="metro-drift-note" class="muted" style="font-size:12px"></span>
         <span class="grow"></span>
         <button id="metro-drift-now" title="Trigger a random tempo change immediately">Drift now</button>
       </div>
@@ -3760,6 +3776,10 @@ const Metro = {
   driftMin: 60,
   driftMax: 160,
   driftGlide: false,
+  driftScale: false,    // shorter gap between changes once the tempo is fast
+  driftFastBpm: 160,
+  driftFastEvery: 10,
+  driftSlowEvery: 30,
 
   pauses: false,
   pauseFor: 5,
@@ -3810,7 +3830,7 @@ const Metro = {
     this.glide = null;
     this.beatQueue.length = 0;
     this.nextNoteTime = ctx.currentTime + 0.08;
-    this.nextDriftAt = this.nextNoteTime + Math.max(1, this.driftEvery);
+    this.nextDriftAt = this.nextNoteTime + this.driftInterval(this.bpm);
     this.pauseUntil = 0;
     this.nextPauseAt = this.nextNoteTime + this.pauseGap();
     this.timerId = setInterval(() => this.scheduler(), 25);
@@ -3881,19 +3901,29 @@ const Metro = {
     // Sitting on a bound, the clamp would swallow the move — bounce off it instead.
     if (Math.abs(target - cur) < 1) target = Math.round(Math.min(hi, Math.max(lo, cur - delta)));
 
+    // The wait keys off the tempo we're landing on, so drifting up into the
+    // fast band immediately shortens the gap to the next change.
+    const wait = this.driftInterval(target);
     if (this.driftGlide) {
-      const span = Math.min(Math.max(1, this.driftEvery) * 0.5, 6);
+      const span = Math.min(wait * 0.5, 6);
       this.glide = { from: cur, to: target, start: t, end: t + span };
     } else {
       this.bpm = target;
       this.glide = null;
     }
-    this.nextDriftAt = t + Math.max(1, this.driftEvery);
+    this.nextDriftAt = t + wait;
   },
 
   driftNow() {
     if (!this.running) return;
     this.rollDrift(Math.max(this.ctx.currentTime, this.nextNoteTime));
+  },
+
+  // Seconds to wait before the next tempo change. With scaling on, that gap is
+  // shorter once the tempo is at or above the threshold.
+  driftInterval(bpm) {
+    if (!this.driftScale) return Math.max(1, this.driftEvery);
+    return Math.max(1, bpm >= this.driftFastBpm ? this.driftFastEvery : this.driftSlowEvery);
   },
 
   // Seconds to wait before the next drop-out, drawn from the min/max window.
@@ -3994,7 +4024,10 @@ const Metro = {
     } else if (this.running && this.pauses) {
       state = `next drop-out in ${Math.max(0, this.nextPauseAt - now).toFixed(1)}s`;
     } else if (!this.running && this.drift) {
-      state = `drift armed: ±${this.driftAmount} BPM every ${this.driftEvery}s`;
+      const when = this.driftScale
+        ? `every ${this.driftFastEvery}s at ${this.driftFastBpm}+ BPM, else ${this.driftSlowEvery}s`
+        : `every ${this.driftEvery}s`;
+      state = `drift armed: ±${this.driftAmount} BPM ${when}`;
     } else if (!this.running && this.pauses) {
       state = `pause mode armed: ${this.pauseFor}s drop-outs`;
     }
@@ -4010,12 +4043,27 @@ const Metro = {
 
     const label = $("#metro-sound").selectedOptions[0]?.textContent || this.sound;
     const bits = [`${Math.round(this.bpm)} BPM`, label.toLowerCase()];
-    if (this.drift) bits.push(`drift ±${this.driftAmount} every ${this.driftEvery}s`);
+    if (this.drift) bits.push(this.driftScale
+      ? `drift ±${this.driftAmount} every ${this.driftFastEvery}s/${this.driftSlowEvery}s`
+      : `drift ±${this.driftAmount} every ${this.driftEvery}s`);
     if (this.pauses) bits.push(`${this.pauseFor}s pauses`);
     $("#metro-summary").textContent = `— ${this.running ? "running · " : ""}${bits.join(" · ")}`;
   },
 
   /* ---------- settings ---------- */
+
+  // The fixed-interval field and the fast/slow tier fields are alternatives —
+  // only one set applies, so only one set is shown.
+  syncDriftFields() {
+    $("#metro-drift-opts").hidden = !this.drift;
+    $("#metro-drift-fields").hidden = !this.drift;
+    $("#metro-drift-extra").hidden = !this.drift;
+    $("#metro-drift-every-field").hidden = this.driftScale;
+    for (const el of document.querySelectorAll(".drift-scale-field")) el.hidden = !this.driftScale;
+    $("#metro-drift-note").textContent = this.driftScale
+      ? `${this.driftFastBpm} BPM and up → every ${this.driftFastEvery}s · below → every ${this.driftSlowEvery}s`
+      : "";
+  },
 
   readInputs() {
     this.sound = $("#metro-sound").value;
@@ -4027,13 +4075,16 @@ const Metro = {
     this.driftMin = Math.min(300, Math.max(30, parseFloat($("#metro-drift-min").value) || 60));
     this.driftMax = Math.min(300, Math.max(30, parseFloat($("#metro-drift-max").value) || 160));
     this.driftGlide = $("#metro-drift-glide").checked;
+    this.driftScale = $("#metro-drift-scale").checked;
+    this.driftFastBpm = Math.min(300, Math.max(30, parseFloat($("#metro-drift-fast-bpm").value) || 160));
+    this.driftFastEvery = Math.max(1, parseFloat($("#metro-drift-fast-every").value) || 10);
+    this.driftSlowEvery = Math.max(1, parseFloat($("#metro-drift-slow-every").value) || 30);
     this.pauses = $("#metro-pause").checked;
     this.pauseFor = Math.min(120, Math.max(0.5, parseFloat($("#metro-pause-for").value) || 5));
     this.pauseGapMin = Math.max(1, parseFloat($("#metro-pause-min").value) || 20);
     this.pauseGapMax = Math.max(1, parseFloat($("#metro-pause-max").value) || 60);
     if (this.master) this.master.gain.setTargetAtTime(this.volume, this.ctx.currentTime, 0.01);
-    $("#metro-drift-fields").hidden = !this.drift;
-    $("#metro-drift-extra").hidden = !this.drift;
+    this.syncDriftFields();
     $("#metro-pause-fields").hidden = !this.pauses;
     $("#metro-pause-extra").hidden = !this.pauses;
     // Turning pause mode on mid-run needs a first drop-out scheduled.
@@ -4050,6 +4101,8 @@ const Metro = {
       bpm: this.bpm, sound: this.sound, volume: this.volume, beatsPerBar: this.beatsPerBar,
       drift: this.drift, driftEvery: this.driftEvery, driftAmount: this.driftAmount,
       driftMin: this.driftMin, driftMax: this.driftMax, driftGlide: this.driftGlide,
+      driftScale: this.driftScale, driftFastBpm: this.driftFastBpm,
+      driftFastEvery: this.driftFastEvery, driftSlowEvery: this.driftSlowEvery,
       pauses: this.pauses, pauseFor: this.pauseFor,
       pauseGapMin: this.pauseGapMin, pauseGapMax: this.pauseGapMax,
     }));
@@ -4074,12 +4127,15 @@ const Metro = {
     if (s.driftMin) { this.driftMin = s.driftMin; $("#metro-drift-min").value = s.driftMin; }
     if (s.driftMax) { this.driftMax = s.driftMax; $("#metro-drift-max").value = s.driftMax; }
     if (typeof s.driftGlide === "boolean") { this.driftGlide = s.driftGlide; $("#metro-drift-glide").checked = s.driftGlide; }
+    if (typeof s.driftScale === "boolean") { this.driftScale = s.driftScale; $("#metro-drift-scale").checked = s.driftScale; }
+    if (s.driftFastBpm > 0) { this.driftFastBpm = s.driftFastBpm; $("#metro-drift-fast-bpm").value = s.driftFastBpm; }
+    if (s.driftFastEvery > 0) { this.driftFastEvery = s.driftFastEvery; $("#metro-drift-fast-every").value = s.driftFastEvery; }
+    if (s.driftSlowEvery > 0) { this.driftSlowEvery = s.driftSlowEvery; $("#metro-drift-slow-every").value = s.driftSlowEvery; }
     if (typeof s.pauses === "boolean") { this.pauses = s.pauses; $("#metro-pause").checked = s.pauses; }
     if (s.pauseFor > 0) { this.pauseFor = s.pauseFor; $("#metro-pause-for").value = s.pauseFor; }
     if (s.pauseGapMin > 0) { this.pauseGapMin = s.pauseGapMin; $("#metro-pause-min").value = s.pauseGapMin; }
     if (s.pauseGapMax > 0) { this.pauseGapMax = s.pauseGapMax; $("#metro-pause-max").value = s.pauseGapMax; }
-    $("#metro-drift-fields").hidden = !this.drift;
-    $("#metro-drift-extra").hidden = !this.drift;
+    this.syncDriftFields();
     $("#metro-pause-fields").hidden = !this.pauses;
     $("#metro-pause-extra").hidden = !this.pauses;
     this.renderState();
@@ -4100,6 +4156,7 @@ $("#metro-bpm-num").addEventListener("input", (e) => {
 $("#metro-sound").addEventListener("change", () => { Metro.readInputs(); Metro.preview(); });
 for (const id of ["#metro-bars", "#metro-volume", "#metro-drift", "#metro-drift-every",
                   "#metro-drift-amount", "#metro-drift-min", "#metro-drift-max", "#metro-drift-glide",
+                  "#metro-drift-scale", "#metro-drift-fast-bpm", "#metro-drift-fast-every", "#metro-drift-slow-every",
                   "#metro-pause", "#metro-pause-for", "#metro-pause-min", "#metro-pause-max"]) {
   $(id).addEventListener("input", () => {
     const wasBars = Metro.beatsPerBar;
