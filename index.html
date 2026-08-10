@@ -57,6 +57,25 @@
   .progress { position: absolute; bottom: 0; left: 0; height: 2px; background: var(--accent); width: 0%; transition: width 0.05s linear; }
 
   .errbox { color: #ffb4b4; background: #2a1414; border: 1px solid #4a2020; padding: 10px; border-radius: 6px; margin: 10px 0; }
+
+  /* metronome */
+  .metro-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px 16px; margin-top: 12px; }
+  .metro-field { display: flex; flex-direction: column; gap: 4px; }
+  .metro-field > label { font-size: 12px; color: var(--muted); }
+  .metro-field input[type=number], .metro-field select { background: #0e0f12; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 13px; width: 100%; }
+  #metro-readout { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  #metro-bpm-big { font-size: 40px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  #metro-bpm-big small { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 4px; }
+  .beat-dot { width: 18px; height: 18px; border-radius: 50%; background: #33353d; flex: none; transition: background 0.12s, transform 0.12s, box-shadow 0.12s; }
+  .beat-dot.on { background: var(--accent); transform: scale(1.35); box-shadow: 0 0 14px rgba(255, 69, 0, 0.6); }
+  .beat-dot.on.accent { background: #ffd08a; box-shadow: 0 0 18px rgba(255, 208, 138, 0.75); }
+  /* still counting, just not sounding */
+  .beat-dot.on.silent { background: transparent; box-shadow: none; transform: scale(1.1); border: 2px solid #5a5d68; }
+  /* .row/.metro-grid set display, which would otherwise beat the UA's [hidden] rule */
+  [hidden] { display: none !important; }
+  #metro-state { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #ctrl-metro.on { background: var(--accent); border-color: var(--accent); }
+  #stage .beat-dot { width: 12px; height: 12px; }
 </style>
 </head>
 <body>
@@ -64,7 +83,7 @@
 <div id="app" class="container">
   <h1>Reddit Saved Slideshow</h1>
   <p class="muted">Local-only viewer. Upload your Reddit GDPR-export CSV; everything stays in this browser.</p>
-  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-07-20 12:47 UTC</strong></p>
+  <p class="muted" style="font-size:12px;margin-top:-8px">Deployed: <strong>2026-08-10 15:13 UTC</strong></p>
 
   <div id="oauth-panel" class="panel">
     <strong>Option A — Live Reddit (OAuth):</strong>
@@ -401,6 +420,108 @@
     </details>
   </div>
 
+  <details id="metro-panel" class="panel" style="margin-top:8px">
+    <summary style="cursor:pointer"><strong>Metronome</strong> <span id="metro-summary" class="muted" style="font-size:12px"></span></summary>
+    <p class="muted" style="font-size:12px;margin:8px 0">Runs independently of the slideshow — start it here or with the <strong>♩</strong> button (hotkey <kbd>M</kbd>) once the show is running. Turn on <strong>random drift</strong> and it will speed up or slow down by a random amount every time your chosen duration elapses.</p>
+
+    <div id="metro-readout" style="margin-top:12px">
+      <span class="beat-dot" id="metro-dot"></span>
+      <span id="metro-bpm-big">100<small>BPM</small></span>
+      <button id="metro-toggle" class="primary">Start</button>
+      <button id="metro-tap" title="Tap 3+ times in rhythm to set the tempo">Tap tempo</button>
+      <span class="grow"></span>
+      <span id="metro-state"></span>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <label for="metro-bpm" style="white-space:nowrap">Tempo</label>
+      <input id="metro-bpm" type="range" min="30" max="300" step="1" value="100" style="flex:1;min-width:180px;accent-color:var(--accent)">
+      <input id="metro-bpm-num" type="number" min="30" max="300" step="1" value="100" style="width:80px;background:#0e0f12;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+    </div>
+
+    <div class="metro-grid">
+      <div class="metro-field">
+        <label for="metro-sound">Sound</label>
+        <select id="metro-sound">
+          <option value="click" selected>Click (classic)</option>
+          <option value="beep">Beep</option>
+          <option value="woodblock">Woodblock</option>
+          <option value="cowbell">Cowbell</option>
+          <option value="rimshot">Rimshot</option>
+          <option value="hihat">Hi-hat</option>
+          <option value="kick">Kick drum</option>
+          <option value="tick">Clock tick</option>
+          <option value="blip">Blip (8-bit)</option>
+        </select>
+      </div>
+      <div class="metro-field">
+        <label for="metro-bars">Accent every</label>
+        <select id="metro-bars">
+          <option value="0">No accent</option>
+          <option value="2">2 beats</option>
+          <option value="3">3 beats</option>
+          <option value="4" selected>4 beats</option>
+          <option value="6">6 beats</option>
+          <option value="8">8 beats</option>
+        </select>
+      </div>
+      <div class="metro-field">
+        <label for="metro-volume">Volume</label>
+        <input id="metro-volume" type="range" min="0" max="100" step="1" value="70" style="accent-color:var(--accent);padding-top:8px">
+      </div>
+    </div>
+
+    <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+      <label style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="metro-drift"> <strong>Random drift</strong> — speed up or slow down on a timer</label>
+      <div class="metro-grid" id="metro-drift-fields" hidden>
+        <div class="metro-field">
+          <label for="metro-drift-every">Change every (seconds)</label>
+          <input id="metro-drift-every" type="number" min="1" max="3600" step="1" value="30">
+        </div>
+        <div class="metro-field">
+          <label for="metro-drift-amount">Change by up to (± BPM)</label>
+          <input id="metro-drift-amount" type="number" min="1" max="150" step="1" value="15">
+        </div>
+        <div class="metro-field">
+          <label for="metro-drift-min">Slowest allowed (BPM)</label>
+          <input id="metro-drift-min" type="number" min="30" max="300" step="1" value="60">
+        </div>
+        <div class="metro-field">
+          <label for="metro-drift-max">Fastest allowed (BPM)</label>
+          <input id="metro-drift-max" type="number" min="30" max="300" step="1" value="160">
+        </div>
+      </div>
+      <div class="row" id="metro-drift-extra" hidden style="margin-top:10px">
+        <label style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="metro-drift-glide"> Glide smoothly into the new tempo</label>
+        <span class="grow"></span>
+        <button id="metro-drift-now" title="Trigger a random tempo change immediately">Drift now</button>
+      </div>
+    </div>
+
+    <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+      <label style="display:inline-flex;align-items:center;gap:6px"><input type="checkbox" id="metro-pause"> <strong>Pause mode</strong> — drop out at random, then come back in</label>
+      <p class="muted" style="font-size:12px;margin:6px 0 0">The count keeps running silently through the gap, so it comes back in exactly on time. The dot keeps pulsing as a hollow ring while it's silent.</p>
+      <div class="metro-grid" id="metro-pause-fields" hidden>
+        <div class="metro-field">
+          <label for="metro-pause-for">Stop for (seconds)</label>
+          <input id="metro-pause-for" type="number" min="0.5" max="120" step="0.5" value="5">
+        </div>
+        <div class="metro-field">
+          <label for="metro-pause-min">Wait at least (seconds)</label>
+          <input id="metro-pause-min" type="number" min="1" max="3600" step="1" value="20">
+        </div>
+        <div class="metro-field">
+          <label for="metro-pause-max">Wait at most (seconds)</label>
+          <input id="metro-pause-max" type="number" min="1" max="3600" step="1" value="60">
+        </div>
+      </div>
+      <div class="row" id="metro-pause-extra" hidden style="margin-top:10px">
+        <span class="grow"></span>
+        <button id="metro-pause-now" title="Drop out immediately for the set length">Pause now</button>
+      </div>
+    </div>
+  </details>
+
   <div id="errors"></div>
 </div>
 
@@ -422,6 +543,10 @@
       <label>Interval: <span id="interval-label">1.0s</span></label>
       <input id="ctrl-interval" type="range" min="0.5" max="10" step="0.1" value="1">
       <label><input id="ctrl-hold" type="checkbox" checked> Hold for videos</label>
+      <span style="margin-left:12px"></span>
+      <button id="ctrl-metro" title="Toggle the metronome (M)">♩ Metronome</button>
+      <span class="beat-dot" id="ctrl-metro-dot"></span>
+      <span id="ctrl-metro-bpm" style="font-variant-numeric:tabular-nums;min-width:62px"></span>
       <span class="grow"></span>
       <button id="ctrl-shuffle">Reshuffle</button>
       <button id="ctrl-exit">Exit</button>
@@ -446,6 +571,7 @@ const LS = {
   HIDDEN: "rss.hidden_subs",
   OAUTH_PROXY: "rss.oauth_proxy",
   SAVED_RSS: "rss.saved_rss_url",
+  METRO: "rss.metro",   // { bpm, sound, volume, beatsPerBar, drift... }
 };
 
 /* ============================================================
@@ -2995,6 +3121,7 @@ const Show = {
       if (e.key === "ArrowRight") this.next();
       else if (e.key === "ArrowLeft") this.prev();
       else if (e.key === " ") { e.preventDefault(); this.togglePlay(); }
+      else if (e.key === "m" || e.key === "M") Metro.toggle();
       else if (e.key === "Escape") this.exit();
     };
     window.addEventListener("keydown", this._hk);
@@ -3481,6 +3608,506 @@ $("#ctrl-hold").addEventListener("change", (e) => {
   Show.savePrefs();
 });
 
+/* ============================================================
+ * Metronome — Web Audio, synthesised sounds, optional random tempo drift.
+ *
+ * setTimeout is far too jittery to place beats directly (it drifts by tens of
+ * ms under load), so the interval below only *schedules*: every 25ms it books
+ * every beat falling in the next ~120ms onto the AudioContext clock, which is
+ * sample-accurate. Backgrounded tabs throttle timers to ~1s, so the booking
+ * window widens when the page is hidden or the beat drops out.
+ * ============================================================ */
+
+// One second of white noise, reused by every percussive sound.
+function metroNoise(ctx) {
+  if (!ctx._noiseBuf) {
+    const len = Math.floor(ctx.sampleRate * 0.5);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    ctx._noiseBuf = buf;
+  }
+  return ctx._noiseBuf;
+}
+
+// Percussive envelope. Exponential ramps can't touch zero, hence the 0.0001 floor.
+function metroEnv(ctx, dest, t, peak, attack, decay) {
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(peak, t + attack);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + attack + decay);
+  g.connect(dest);
+  return g;
+}
+
+function metroNoiseHit(ctx, dest, t, peak, decay, filter) {
+  const g = metroEnv(ctx, dest, t, peak, 0.001, decay);
+  const f = ctx.createBiquadFilter();
+  f.type = filter.type;
+  f.frequency.value = filter.freq;
+  if (filter.q != null) f.Q.value = filter.q;
+  const src = ctx.createBufferSource();
+  src.buffer = metroNoise(ctx);
+  src.connect(f).connect(g);
+  src.start(t);
+  src.stop(t + decay + 0.05);
+  return g;
+}
+
+const METRO_SOUNDS = {
+  // Envelope peaks below are pre-filter: a narrow bandpass throws away most of
+  // the noise energy, so the noise-based sounds are driven well above 1.0 to
+  // land near the same output level as the oscillator ones.
+  click(ctx, dest, t, accent) {
+    metroNoiseHit(ctx, dest, t, accent ? 2.0 : 1.5, 0.03,
+      { type: "bandpass", freq: accent ? 3200 : 2000, q: 2 });
+  },
+
+  beep(ctx, dest, t, accent) {
+    const o = ctx.createOscillator();
+    o.type = "sine";
+    o.frequency.value = accent ? 1320 : 880;
+    o.connect(metroEnv(ctx, dest, t, accent ? 0.9 : 0.55, 0.002, 0.05));
+    o.start(t);
+    o.stop(t + 0.12);
+  },
+
+  woodblock(ctx, dest, t, accent) {
+    const f0 = accent ? 1800 : 1250;
+    const o = ctx.createOscillator();
+    o.type = "triangle";
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(f0 * 0.55, t + 0.035);
+    o.connect(metroEnv(ctx, dest, t, accent ? 0.9 : 0.7, 0.001, 0.045));
+    o.start(t);
+    o.stop(t + 0.09);
+    metroNoiseHit(ctx, dest, t, 0.22, 0.008, { type: "highpass", freq: 2000 });
+  },
+
+  cowbell(ctx, dest, t, accent) {
+    const g = metroEnv(ctx, dest, t, accent ? 0.6 : 0.45, 0.002, accent ? 0.34 : 0.17);
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.value = 2640;
+    bp.Q.value = 1.2;
+    bp.connect(g);
+    for (const f of [540, 800]) {
+      const o = ctx.createOscillator();
+      o.type = "square";
+      o.frequency.value = f * (accent ? 1.15 : 1);
+      o.connect(bp);
+      o.start(t);
+      o.stop(t + 0.45);
+    }
+  },
+
+  rimshot(ctx, dest, t, accent) {
+    metroNoiseHit(ctx, dest, t, accent ? 1.8 : 1.0, 0.05,
+      { type: "bandpass", freq: accent ? 900 : 600, q: 1.5 });
+    const o = ctx.createOscillator();
+    o.type = "triangle";
+    o.frequency.setValueAtTime(accent ? 420 : 320, t);
+    o.frequency.exponentialRampToValueAtTime(120, t + 0.03);
+    o.connect(metroEnv(ctx, dest, t, accent ? 0.62 : 0.45, 0.001, 0.03));
+    o.start(t);
+    o.stop(t + 0.07);
+  },
+
+  hihat(ctx, dest, t, accent) {
+    // The accent opens the hat rather than just getting louder.
+    metroNoiseHit(ctx, dest, t, accent ? 0.5 : 0.35, accent ? 0.16 : 0.035,
+      { type: "highpass", freq: 7000 });
+  },
+
+  kick(ctx, dest, t, accent) {
+    const o = ctx.createOscillator();
+    o.type = "sine";
+    o.frequency.setValueAtTime(accent ? 170 : 130, t);
+    o.frequency.exponentialRampToValueAtTime(accent ? 52 : 42, t + 0.08);
+    o.connect(metroEnv(ctx, dest, t, accent ? 1 : 0.7, 0.003, 0.22));
+    o.start(t);
+    o.stop(t + 0.32);
+  },
+
+  tick(ctx, dest, t, accent) {
+    metroNoiseHit(ctx, dest, t, accent ? 0.8 : 0.28, 0.006,
+      { type: "highpass", freq: accent ? 5000 : 3500 });
+  },
+
+  blip(ctx, dest, t, accent) {
+    const o = ctx.createOscillator();
+    o.type = "square";
+    o.frequency.value = accent ? 2093 : 1568;
+    o.connect(metroEnv(ctx, dest, t, accent ? 0.45 : 0.28, 0.001, 0.03));
+    o.start(t);
+    o.stop(t + 0.07);
+  },
+};
+
+const Metro = {
+  ctx: null,
+  master: null,
+  running: false,
+
+  bpm: 100,
+  sound: "click",
+  volume: 0.7,
+  beatsPerBar: 4,
+
+  drift: false,
+  driftEvery: 30,
+  driftAmount: 15,
+  driftMin: 60,
+  driftMax: 160,
+  driftGlide: false,
+
+  pauses: false,
+  pauseFor: 5,
+  pauseGapMin: 20,
+  pauseGapMax: 60,
+
+  // scheduler state
+  nextNoteTime: 0,
+  nextDriftAt: 0,
+  nextPauseAt: 0,
+  pauseUntil: 0,      // beats before this AudioContext time are counted but not sounded
+  beat: 0,
+  glide: null,        // { from, to, start, end } in AudioContext time
+  beatQueue: [],      // beats booked but not yet heard, for the visual flash
+  timerId: null,
+  rafId: null,
+  taps: [],
+
+  ensureCtx() {
+    if (!this.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) { showError("This browser has no Web Audio support, so the metronome can't run."); return null; }
+      this.ctx = new AC();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = this.volume;
+      this.master.connect(this.ctx.destination);
+    }
+    // Browsers start the context suspended until a user gesture touches it.
+    if (this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
+    return this.ctx;
+  },
+
+  // Tempo at a given AudioContext time — interpolated while a glide is running.
+  bpmAt(t) {
+    const g = this.glide;
+    if (!g) return this.bpm;
+    if (t <= g.start) return g.from;
+    if (t >= g.end) return g.to;
+    return g.from + (g.to - g.from) * ((t - g.start) / (g.end - g.start));
+  },
+
+  start() {
+    if (this.running) return;
+    const ctx = this.ensureCtx();
+    if (!ctx) return;
+    this.running = true;
+    this.beat = 0;
+    this.glide = null;
+    this.beatQueue.length = 0;
+    this.nextNoteTime = ctx.currentTime + 0.08;
+    this.nextDriftAt = this.nextNoteTime + Math.max(1, this.driftEvery);
+    this.pauseUntil = 0;
+    this.nextPauseAt = this.nextNoteTime + this.pauseGap();
+    this.timerId = setInterval(() => this.scheduler(), 25);
+    this.scheduler();
+    this.renderState();
+    this.uiLoop();
+  },
+
+  stop() {
+    if (!this.running) return;
+    this.running = false;
+    if (this.timerId) { clearInterval(this.timerId); this.timerId = null; }
+    if (this.rafId) { cancelAnimationFrame(this.rafId); this.rafId = null; }
+    // Freeze at whatever the glide had reached rather than snapping back.
+    if (this.glide) { this.bpm = Math.round(this.bpmAt(this.ctx.currentTime)); this.glide = null; }
+    this.pauseUntil = 0; // don't resume into a leftover gap
+    this.beatQueue.length = 0;
+    this.clearDots();
+    this.syncTempoUI();
+    this.renderState();
+    this.renderLive(this.ctx ? this.ctx.currentTime : 0);
+  },
+
+  toggle() { this.running ? this.stop() : this.start(); },
+
+  scheduler() {
+    const ctx = this.ctx;
+    if (!ctx || !this.running) return;
+    // A hidden tab only gets ~1 tick/sec, so book further ahead to bridge it.
+    const ahead = document.hidden ? 1.5 : 0.12;
+    // requestAnimationFrame is the only consumer of beatQueue and it stops
+    // while the tab is hidden, so drop beats it has already missed. Without
+    // this the queue grows unbounded for as long as the page is backgrounded.
+    const missed = ctx.currentTime - 0.5;
+    while (this.beatQueue.length && this.beatQueue[0].t < missed) this.beatQueue.shift();
+    while (this.nextNoteTime < ctx.currentTime + ahead) {
+      if (this.drift && this.nextNoteTime >= this.nextDriftAt) this.rollDrift(this.nextNoteTime);
+      if (this.glide && this.nextNoteTime >= this.glide.end) {
+        this.bpm = this.glide.to;
+        this.glide = null;
+      }
+      if (this.pauses && this.nextNoteTime >= this.nextPauseAt && this.nextNoteTime >= this.pauseUntil) {
+        this.pauseUntil = this.nextNoteTime + Math.max(0.5, this.pauseFor);
+        this.nextPauseAt = this.pauseUntil + this.pauseGap();
+      }
+      const bpm = this.bpmAt(this.nextNoteTime);
+      const accent = this.beatsPerBar > 0 && this.beat % this.beatsPerBar === 0;
+      // Silent beats still advance the clock and the bar count, so the pulse
+      // picks up exactly where it would have been.
+      const silent = this.nextNoteTime < this.pauseUntil;
+      if (!silent) (METRO_SOUNDS[this.sound] || METRO_SOUNDS.click)(ctx, this.master, this.nextNoteTime, accent);
+      this.beatQueue.push({ t: this.nextNoteTime, accent, silent });
+      this.nextNoteTime += 60 / bpm;
+      this.beat = this.beatsPerBar > 0 ? (this.beat + 1) % this.beatsPerBar : this.beat + 1;
+    }
+  },
+
+  // Pick a new tempo: random direction, random size up to ±driftAmount,
+  // held inside the min/max bounds.
+  rollDrift(t) {
+    const lo = Math.min(this.driftMin, this.driftMax);
+    const hi = Math.max(this.driftMin, this.driftMax);
+    const cur = Math.min(hi, Math.max(lo, this.bpmAt(t)));
+    const amt = Math.max(1, this.driftAmount);
+    // At least a quarter of the allowance, so a "change" is always audible.
+    const delta = (Math.random() * 0.75 + 0.25) * amt * (Math.random() < 0.5 ? -1 : 1);
+    let target = Math.round(Math.min(hi, Math.max(lo, cur + delta)));
+    // Sitting on a bound, the clamp would swallow the move — bounce off it instead.
+    if (Math.abs(target - cur) < 1) target = Math.round(Math.min(hi, Math.max(lo, cur - delta)));
+
+    if (this.driftGlide) {
+      const span = Math.min(Math.max(1, this.driftEvery) * 0.5, 6);
+      this.glide = { from: cur, to: target, start: t, end: t + span };
+    } else {
+      this.bpm = target;
+      this.glide = null;
+    }
+    this.nextDriftAt = t + Math.max(1, this.driftEvery);
+  },
+
+  driftNow() {
+    if (!this.running) return;
+    this.rollDrift(Math.max(this.ctx.currentTime, this.nextNoteTime));
+  },
+
+  // Seconds to wait before the next drop-out, drawn from the min/max window.
+  pauseGap() {
+    const lo = Math.max(1, Math.min(this.pauseGapMin, this.pauseGapMax));
+    const hi = Math.max(1, Math.max(this.pauseGapMin, this.pauseGapMax));
+    return lo + Math.random() * (hi - lo);
+  },
+
+  pauseNow() {
+    if (!this.running) return;
+    // Start at the next unbooked beat: anything already scheduled will sound.
+    this.pauseUntil = this.nextNoteTime + Math.max(0.5, this.pauseFor);
+    this.nextPauseAt = this.pauseUntil + this.pauseGap();
+  },
+
+  // Play one hit so a sound can be auditioned while stopped.
+  preview() {
+    if (this.running) return;
+    const ctx = this.ensureCtx();
+    if (!ctx) return;
+    (METRO_SOUNDS[this.sound] || METRO_SOUNDS.click)(ctx, this.master, ctx.currentTime + 0.02, false);
+    this.flash(false);
+  },
+
+  tap() {
+    const now = performance.now();
+    const last = this.taps[this.taps.length - 1];
+    if (last != null && now - last > 2500) this.taps.length = 0; // new attempt
+    this.taps.push(now);
+    if (this.taps.length > 6) this.taps.shift();
+    if (this.taps.length < 3) {
+      $("#metro-state").textContent = `tap ${3 - this.taps.length} more…`;
+      return;
+    }
+    let sum = 0;
+    for (let i = 1; i < this.taps.length; i++) sum += this.taps[i] - this.taps[i - 1];
+    const avg = sum / (this.taps.length - 1);
+    if (avg > 0) this.setBpm(60000 / avg);
+  },
+
+  setBpm(v) {
+    this.bpm = Math.min(300, Math.max(30, Math.round(v) || 100));
+    this.glide = null;
+    this.syncTempoUI();
+    this.renderLive(this.ctx ? this.ctx.currentTime : 0);
+    this.save();
+  },
+
+  /* ---------- UI ---------- */
+
+  uiLoop() {
+    if (!this.running) return;
+    const now = this.ctx.currentTime;
+    let hit = null;
+    while (this.beatQueue.length && this.beatQueue[0].t <= now) hit = this.beatQueue.shift();
+    if (hit) this.flash(hit.accent, hit.silent);
+    this.renderLive(now);
+    this.rafId = requestAnimationFrame(() => this.uiLoop());
+  },
+
+  dots() { return [$("#metro-dot"), $("#ctrl-metro-dot")].filter(Boolean); },
+  clearDots() { for (const d of this.dots()) d.classList.remove("on", "accent", "silent"); },
+
+  flash(accent, silent) {
+    for (const d of this.dots()) {
+      d.classList.toggle("accent", !!accent && !silent);
+      d.classList.toggle("silent", !!silent);
+      d.classList.add("on");
+    }
+    const beatMs = (60 / Math.max(30, this.bpm)) * 1000;
+    clearTimeout(this._flashT);
+    this._flashT = setTimeout(() => {
+      for (const d of this.dots()) d.classList.remove("on");
+    }, Math.min(110, beatMs * 0.45));
+  },
+
+  syncTempoUI() {
+    const v = Math.round(this.glide && this.ctx ? this.bpmAt(this.ctx.currentTime) : this.bpm);
+    const slider = $("#metro-bpm"), num = $("#metro-bpm-num");
+    if (slider && document.activeElement !== slider && +slider.value !== v) slider.value = v;
+    if (num && document.activeElement !== num && +num.value !== v) num.value = v;
+  },
+
+  renderLive(now) {
+    const live = Math.round(this.bpmAt(now));
+    $("#metro-bpm-big").innerHTML = live + "<small>BPM</small>";
+    $("#ctrl-metro-bpm").textContent = this.running ? live + " BPM" : "";
+    this.syncTempoUI();
+
+    let state = "";
+    if (this.running && now < this.pauseUntil) {
+      state = `silent for ${(this.pauseUntil - now).toFixed(1)}s`;
+    } else if (this.running && this.drift) {
+      state = this.glide
+        ? `gliding to ${Math.round(this.glide.to)} BPM…`
+        : `next change in ${Math.max(0, this.nextDriftAt - now).toFixed(1)}s`;
+    } else if (this.running && this.pauses) {
+      state = `next drop-out in ${Math.max(0, this.nextPauseAt - now).toFixed(1)}s`;
+    } else if (!this.running && this.drift) {
+      state = `drift armed: ±${this.driftAmount} BPM every ${this.driftEvery}s`;
+    } else if (!this.running && this.pauses) {
+      state = `pause mode armed: ${this.pauseFor}s drop-outs`;
+    }
+    $("#metro-state").textContent = state;
+  },
+
+  renderState() {
+    const btn = $("#metro-toggle");
+    btn.textContent = this.running ? "Stop" : "Start";
+    btn.classList.toggle("primary", !this.running);
+    $("#ctrl-metro").classList.toggle("on", this.running);
+    if (!this.running) $("#ctrl-metro-bpm").textContent = "";
+
+    const label = $("#metro-sound").selectedOptions[0]?.textContent || this.sound;
+    const bits = [`${Math.round(this.bpm)} BPM`, label.toLowerCase()];
+    if (this.drift) bits.push(`drift ±${this.driftAmount} every ${this.driftEvery}s`);
+    if (this.pauses) bits.push(`${this.pauseFor}s pauses`);
+    $("#metro-summary").textContent = `— ${this.running ? "running · " : ""}${bits.join(" · ")}`;
+  },
+
+  /* ---------- settings ---------- */
+
+  readInputs() {
+    this.sound = $("#metro-sound").value;
+    this.beatsPerBar = parseInt($("#metro-bars").value, 10) || 0;
+    this.volume = (parseInt($("#metro-volume").value, 10) || 0) / 100;
+    this.drift = $("#metro-drift").checked;
+    this.driftEvery = Math.max(1, parseFloat($("#metro-drift-every").value) || 30);
+    this.driftAmount = Math.max(1, parseFloat($("#metro-drift-amount").value) || 15);
+    this.driftMin = Math.min(300, Math.max(30, parseFloat($("#metro-drift-min").value) || 60));
+    this.driftMax = Math.min(300, Math.max(30, parseFloat($("#metro-drift-max").value) || 160));
+    this.driftGlide = $("#metro-drift-glide").checked;
+    this.pauses = $("#metro-pause").checked;
+    this.pauseFor = Math.min(120, Math.max(0.5, parseFloat($("#metro-pause-for").value) || 5));
+    this.pauseGapMin = Math.max(1, parseFloat($("#metro-pause-min").value) || 20);
+    this.pauseGapMax = Math.max(1, parseFloat($("#metro-pause-max").value) || 60);
+    if (this.master) this.master.gain.setTargetAtTime(this.volume, this.ctx.currentTime, 0.01);
+    $("#metro-drift-fields").hidden = !this.drift;
+    $("#metro-drift-extra").hidden = !this.drift;
+    $("#metro-pause-fields").hidden = !this.pauses;
+    $("#metro-pause-extra").hidden = !this.pauses;
+    // Turning pause mode on mid-run needs a first drop-out scheduled.
+    if (this.running && this.pauses && this.nextPauseAt <= this.nextNoteTime) {
+      this.nextPauseAt = this.nextNoteTime + this.pauseGap();
+    }
+    this.renderState();
+    this.renderLive(this.ctx ? this.ctx.currentTime : 0);
+    this.save();
+  },
+
+  save() {
+    localStorage.setItem(LS.METRO, JSON.stringify({
+      bpm: this.bpm, sound: this.sound, volume: this.volume, beatsPerBar: this.beatsPerBar,
+      drift: this.drift, driftEvery: this.driftEvery, driftAmount: this.driftAmount,
+      driftMin: this.driftMin, driftMax: this.driftMax, driftGlide: this.driftGlide,
+      pauses: this.pauses, pauseFor: this.pauseFor,
+      pauseGapMin: this.pauseGapMin, pauseGapMax: this.pauseGapMax,
+    }));
+  },
+
+  load() {
+    let s = {};
+    try { s = JSON.parse(localStorage.getItem(LS.METRO) || "{}"); } catch { s = {}; }
+    // Clamp on the way in: a junk tempo would make 60/bpm non-finite and spin
+    // the scheduler's while-loop forever.
+    if (s.bpm > 0) {
+      this.bpm = Math.min(300, Math.max(30, Math.round(s.bpm)));
+      $("#metro-bpm").value = this.bpm;
+      $("#metro-bpm-num").value = this.bpm;
+    }
+    if (s.sound && METRO_SOUNDS[s.sound]) { this.sound = s.sound; $("#metro-sound").value = s.sound; }
+    if (typeof s.volume === "number") { this.volume = s.volume; $("#metro-volume").value = Math.round(s.volume * 100); }
+    if (typeof s.beatsPerBar === "number") { this.beatsPerBar = s.beatsPerBar; $("#metro-bars").value = String(s.beatsPerBar); }
+    if (typeof s.drift === "boolean") { this.drift = s.drift; $("#metro-drift").checked = s.drift; }
+    if (s.driftEvery) { this.driftEvery = s.driftEvery; $("#metro-drift-every").value = s.driftEvery; }
+    if (s.driftAmount) { this.driftAmount = s.driftAmount; $("#metro-drift-amount").value = s.driftAmount; }
+    if (s.driftMin) { this.driftMin = s.driftMin; $("#metro-drift-min").value = s.driftMin; }
+    if (s.driftMax) { this.driftMax = s.driftMax; $("#metro-drift-max").value = s.driftMax; }
+    if (typeof s.driftGlide === "boolean") { this.driftGlide = s.driftGlide; $("#metro-drift-glide").checked = s.driftGlide; }
+    if (typeof s.pauses === "boolean") { this.pauses = s.pauses; $("#metro-pause").checked = s.pauses; }
+    if (s.pauseFor > 0) { this.pauseFor = s.pauseFor; $("#metro-pause-for").value = s.pauseFor; }
+    if (s.pauseGapMin > 0) { this.pauseGapMin = s.pauseGapMin; $("#metro-pause-min").value = s.pauseGapMin; }
+    if (s.pauseGapMax > 0) { this.pauseGapMax = s.pauseGapMax; $("#metro-pause-max").value = s.pauseGapMax; }
+    $("#metro-drift-fields").hidden = !this.drift;
+    $("#metro-drift-extra").hidden = !this.drift;
+    $("#metro-pause-fields").hidden = !this.pauses;
+    $("#metro-pause-extra").hidden = !this.pauses;
+    this.renderState();
+    this.renderLive(0);
+  },
+};
+
+$("#metro-toggle").addEventListener("click", () => Metro.toggle());
+$("#metro-tap").addEventListener("click", () => Metro.tap());
+$("#metro-drift-now").addEventListener("click", () => Metro.driftNow());
+$("#metro-pause-now").addEventListener("click", () => Metro.pauseNow());
+$("#ctrl-metro").addEventListener("click", () => Metro.toggle());
+$("#metro-bpm").addEventListener("input", (e) => Metro.setBpm(e.target.value));
+$("#metro-bpm-num").addEventListener("input", (e) => {
+  const v = parseFloat(e.target.value);
+  if (!isNaN(v) && v >= 30 && v <= 300) Metro.setBpm(v);
+});
+$("#metro-sound").addEventListener("change", () => { Metro.readInputs(); Metro.preview(); });
+for (const id of ["#metro-bars", "#metro-volume", "#metro-drift", "#metro-drift-every",
+                  "#metro-drift-amount", "#metro-drift-min", "#metro-drift-max", "#metro-drift-glide",
+                  "#metro-pause", "#metro-pause-for", "#metro-pause-min", "#metro-pause-max"]) {
+  $(id).addEventListener("input", () => {
+    const wasBars = Metro.beatsPerBar;
+    Metro.readInputs();
+    if (Metro.beatsPerBar !== wasBars) Metro.beat = 0; // re-anchor the accent
+  });
+}
+
 document.addEventListener("fullscreenchange", () => {
   if (!document.fullscreenElement && $("#stage").classList.contains("active")) {
     Show.exit();
@@ -3499,6 +4126,7 @@ document.addEventListener("fullscreenchange", () => {
   renderOAuthPanel();
   loadMinScores();
   loadHidden();
+  Metro.load();
   // Rebuild the in-memory index from slides saved on disk (IndexedDB).
   try {
     await buildIndex((n) => { $("#progress-text").textContent = `Loading saved slides… ${n}`; });
